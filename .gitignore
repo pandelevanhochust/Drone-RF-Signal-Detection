@@ -2,3 +2,4 @@
 *.png
 *.txt
 stft_segments
+non_drone_stft
