@@ -1,4 +1,7 @@
 *.bin
 *.png
-*.txt
+*.dat
+data
+output
 stft_segments
+non_drone_stft
