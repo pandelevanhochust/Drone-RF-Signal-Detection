@@ -14,15 +14,14 @@ folders = ["AIR_FY", "AIR_HO", "AIR_ON", "DIS_FY", "DIS_ON", "INS_FY", "INS_HO",
            "PHA_HO", "PHA_ON"]
 
 # path_to_export = "F:/Drone_csv/Clean/"
-path_to_export1 = "C:/Users/navis/toanlv/OutputHdf5"
+path_to_export1 = "C:/Users/navis/toanlv/OutputHdf5/"
 
 for i in folders:
     for (root, dirs, file) in os.walk('C:/Users/navis/toanlv/DroneDetect_V2/BOTH/' + i):
         # print(file)
-        # new_p = path_to_export+i
         new_p1 = path_to_export1 + i
         # os.mkdir(new_p)
-        os.mkdir(new_p1)
+        os.mkdir(new_p1,exist_ok=True)
         for f in file:
             path = ('C:/Users/navis/toanlv/DroneDetect_V2/BOTH/' + i + '/' + f)
             print(path)
