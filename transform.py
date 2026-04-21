@@ -24,7 +24,7 @@ for i in folders:
         # os.mkdir(new_p)
         os.mkdir(new_p1)
         for f in file:
-            path = ('D:/Minor_3_Do_Not_Touch/DroneDetect_V2/DroneDetect_V2/BOTH/' + i + '/' + f)
+            path = ('C:/Users/navis/toanlv/DroneDetect_V2/BOTH/' + i + '/' + f)
             print(path)
             # print(type(path))
             f1 = open(path, "rb")  # open file
