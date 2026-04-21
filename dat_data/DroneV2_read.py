@@ -35,7 +35,7 @@ def compute_spectrogram_efficient(file_path, sample_rate, center_freq, duration_
 
 
 # --- Execution ---
-FILE_PATH = r"MAV_1110_02.dat"
+FILE_PATH = r"droneV2_data/MAV_1110_02.dat"
 FS = 60e6
 CENTER_FREQ = 2.445e9
 

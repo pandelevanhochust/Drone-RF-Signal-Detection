@@ -58,7 +58,7 @@ def transform_data():
                     # 8. Save to HDF5
                     # Using explicit keywords to avoid the Positional Argument TypeError
                     output_file = target_dir / f"{filename[:11]}.h5"
-                    df.to_hdf(str(output_file), key='data', mode='w')
+                    df.to_hdf(str(output_file), key='droneV2_data', mode='w')
 
                     print(f"   -> Saved: {output_file.name}")
 

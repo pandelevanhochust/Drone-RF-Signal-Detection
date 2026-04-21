@@ -4,7 +4,7 @@ from scipy import signal
 import os
 
 # ================= CONFIGURATION =================
-FILE_PATH = r'non_toan.bin'
+FILE_PATH = r'bin_data/non_toan.bin'
 SAMPLE_RATE = 28e6
 WINDOW_SIZE = 100000  # Number of samples per image
 OUTPUT_DIR = 'non_drone_stft'

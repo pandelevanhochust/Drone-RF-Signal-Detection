@@ -1616,7 +1616,7 @@ class SpectrumAnalyzer(QMainWindow):
             self.iq_status_label.setText(f"Error: {e}")
 
     def _iq_save(self):
-        """Save accumulated IQ data to file"""
+        """Save accumulated IQ droneV2_data to file"""
         try:
             all_samples = np.concatenate(self.iq_accum)
             filepath = self.iq_save_path
