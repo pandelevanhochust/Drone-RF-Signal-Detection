@@ -20,8 +20,7 @@ for i in folders:
     for (root, dirs, file) in os.walk('C:/Users/navis/toanlv/DroneDetect_V2/BOTH/' + i):
         # print(file)
         new_p1 = path_to_export1 + i
-        # os.mkdir(new_p)
-        os.mkdir(new_p1,exist_ok=True)
+        os.mkdirs(new_p1,exist_ok=True)
         for f in file:
             path = ('C:/Users/navis/toanlv/DroneDetect_V2/BOTH/' + i + '/' + f)
             print(path)
