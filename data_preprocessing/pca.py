@@ -70,7 +70,7 @@ for label_idx, folder in enumerate(FOLDERS):
 
     for h5_file in sorted(h5_files):
         full_path = os.path.join(folder_path, h5_file)
-        df = pd.read_hdf(full_path, key="droneV2_data")   # shape: (400, 600000)
+        df = pd.read_hdf(full_path, key="data")   # shape: (400, 600000)
         all_X.append(df.values)                            # numpy array
         all_y.extend([label_idx] * len(df))               # 400 copies of this label
 
