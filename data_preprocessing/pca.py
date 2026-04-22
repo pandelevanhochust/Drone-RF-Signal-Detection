@@ -26,9 +26,13 @@ import time
 # CONFIG — adjust these two paths for your machine
 # ─────────────────────────────────────────────────
 
-# Path where data_preprocessing.ipynb saved the .h5 files
-HDF5_INPUT_DIR = "C:/Users/navis/toanlv/OutputHdf5/"
-PCA_OUTPUT_PATH = "C:/Users/navis/toanlv/core/pca_features.h5"
+#Window
+# HDF5_INPUT_DIR = "C:/Users/navis/toanlv/OutputHdf5/"
+# PCA_OUTPUT_PATH = "C:/Users/navis/toanlv/core/pca_features.h5"
+
+#Linux
+HDF5_INPUT_DIR = "/mnt/c/Users/navis/toanlv/OutputHdf5/"
+PCA_OUTPUT_PATH = "/mnt/c/Users/navis/toanlv/core/pca_features.h5"
 
 # Number of PCA components — must match n_outputs logic in Classification.ipynb
 N_PCA_COMPONENTS = 6000
