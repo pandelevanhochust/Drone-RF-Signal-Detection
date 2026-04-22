@@ -1,126 +1,117 @@
-"""
-pca_build_dataset.py
-====================
-This script fills the gap between data_preprocessing.ipynb and Classification.ipynb.
-
-It:
-  1. Loops over every class folder in your HDF5 output directory
-  2. Loads each .h5 file and stacks the samples into one big matrix X
-  3. Assigns an integer label y to each sample based on its folder (class)
-  4. Applies PCA to compress 600,000 features → 6,000 components
-  5. Saves the PCA-reduced X and labels y to a single file: pca_features.h5
-
-Run this AFTER data_preprocessing.ipynb has finished writing all .h5 files.
-Then open Classification.ipynb and load pca_features.h5.
-
-Author: Auto-generated gap-fill for DroneDetect_V2 pipeline
-"""
-
 import os
+import h5py
+import time
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
-import time
+from sklearn.decomposition import IncrementalPCA
 
 # ─────────────────────────────────────────────────
-# CONFIG — adjust these two paths for your machine
+# CONFIG
 # ─────────────────────────────────────────────────
 
-#Window
-# HDF5_INPUT_DIR = "C:/Users/navis/toanlv/OutputHdf5/"
-# PCA_OUTPUT_PATH = "C:/Users/navis/toanlv/core/pca_features.h5"
-
-#Linux
-HDF5_INPUT_DIR = "/mnt/c/Users/navis/toanlv/OutputHdf5/"
+# Linux path (comment out and use Windows path below if needed)
+HDF5_INPUT_DIR  = "/mnt/c/Users/navis/toanlv/OutputHdf5/"
 PCA_OUTPUT_PATH = "/mnt/c/Users/navis/toanlv/core/pca_features.h5"
 
-# Number of PCA components — must match n_outputs logic in Classification.ipynb
-N_PCA_COMPONENTS = 6000
+# Windows path (uncomment if running on Windows directly)
+# HDF5_INPUT_DIR  = "C:/Users/navis/toanlv/OutputHdf5/"
+# PCA_OUTPUT_PATH = "C:/Users/navis/toanlv/core/pca_features.h5"
 
+N_PCA_COMPONENTS = 6000   # compressed feature size — must match Classification.ipynb
 
 FOLDERS = [
-    "AIR_FY", "AIR_HO", "AIR_ON", "DIS_FY", "DIS_ON", "INS_FY", "INS_HO", "INS_ON",
-    "MIN_FY", "MIN_HO", "MIN_ON", "MP1_FY", "MP1_HO", "MP1_ON", "MP2_FY", "MP2_HO",
-    "MP2_ON", "PHA_FY", "PHA_HO", "PHA_ON"
+    "AIR_FY", "AIR_HO", "AIR_ON", "DIS_FY", "DIS_ON",
+    "INS_FY", "INS_HO", "INS_ON", "MIN_FY", "MIN_HO",
+    "MIN_ON", "MP1_FY", "MP1_HO", "MP1_ON", "MP2_FY",
+    "MP2_HO", "MP2_ON", "PHA_FY", "PHA_HO", "PHA_ON",
 ]
 
 # ─────────────────────────────────────────────────
-# STEP 1 — Load all .h5 files and build X, y
+# Build the full ordered list of (file_path, label_idx)
 # ─────────────────────────────────────────────────
-print("=" * 60)
-print("STEP 1: Loading HDF5 files")
-print("=" * 60)
-
-all_X = []   # list of numpy arrays, each (400, 600000)
-all_y = []   # list of integer labels
+file_label_pairs = []
 
 for label_idx, folder in enumerate(FOLDERS):
     folder_path = os.path.join(HDF5_INPUT_DIR, folder)
-
     if not os.path.exists(folder_path):
-        print(f"  [SKIP] Folder not found: {folder_path}")
+        print(f"[SKIP] Folder not found: {folder_path}")
         continue
-
-    h5_files = [f for f in os.listdir(folder_path) if f.endswith(".h5")]
+    h5_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".h5")])
     if not h5_files:
-        print(f"  [SKIP] No .h5 files in: {folder_path}")
+        print(f"[SKIP] No .h5 files in: {folder_path}")
         continue
+    for h5_file in h5_files:
+        file_label_pairs.append((os.path.join(folder_path, h5_file), label_idx))
+    print(f"  [label {label_idx:02d}] {folder} — {len(h5_files)} file(s)")
 
-    print(f"  [{label_idx:02d}] {folder} — {len(h5_files)} file(s)")
-
-    for h5_file in sorted(h5_files):
-        full_path = os.path.join(folder_path, h5_file)
-        df = pd.read_hdf(full_path, key="data")   # shape: (400, 600000)
-        all_X.append(df.values)                            # numpy array
-        all_y.extend([label_idx] * len(df))               # 400 copies of this label
-
-print()
-print(f"  Total files loaded: {sum(len([f for f in os.listdir(os.path.join(HDF5_INPUT_DIR, folder)) if f.endswith('.h5')]) for folder in FOLDERS if os.path.exists(os.path.join(HDF5_INPUT_DIR, folder)))}")
-
-# Stack into one matrix
-X = np.vstack(all_X)          # shape: (N_total_samples, 600000)
-y = np.array(all_y)           # shape: (N_total_samples,)
-
-print(f"\n  X shape: {X.shape}  — samples × raw features")
-print(f"  y shape: {y.shape}  — integer class labels")
-print(f"  Unique classes: {np.unique(y)}")
+total_files = len(file_label_pairs)
+print(f"\nTotal files to process: {total_files}")
+print(f"Estimated samples:      {total_files * 400}  (400 per file)")
 
 # ─────────────────────────────────────────────────
-# STEP 2 — Apply PCA
+# STEP 1 — PASS 1: Fit IncrementalPCA file by file
+#
+#   partial_fit() updates the PCA model with one batch at a time
+#   and immediately discards the data from RAM (del df).
+#   Peak RAM ≈ ~960 MB (one file).
 # ─────────────────────────────────────────────────
 print()
 print("=" * 60)
-print(f"STEP 2: Applying PCA (n_components={N_PCA_COMPONENTS})")
-print("        This may take several minutes for large datasets…")
+print(f"STEP 1 (Pass 1 of 2): Fitting IncrementalPCA")
+print(f"  n_components = {N_PCA_COMPONENTS}")
 print("=" * 60)
+
+ipca = IncrementalPCA(n_components=N_PCA_COMPONENTS)
 
 t0 = time.time()
-pca = PCA(n_components=N_PCA_COMPONENTS)
-X_pca = pca.fit_transform(X)   # shape: (N_total_samples, 6000)
-elapsed = time.time() - t0
+for i, (fpath, label_idx) in enumerate(file_label_pairs):
+    df = pd.read_hdf(fpath, key="data")     # (400, 600000)
+    ipca.partial_fit(df.values)          # update PCA incrementally — no accumulation
+    del df                               # free ~960 MB immediately
+    print(f"  [{i+1:03d}/{total_files}] fitted: {os.path.basename(fpath)}  (label {label_idx})")
 
-variance_explained = pca.explained_variance_ratio_.sum()
-print(f"\n  Done in {elapsed:.1f}s")
-print(f"  X_pca shape:          {X_pca.shape}")
-print(f"  Variance explained:   {variance_explained * 100:.2f}%")
+print(f"\nFit complete in {time.time()-t0:.1f}s")
+print(f"Variance explained: {ipca.explained_variance_ratio_.sum()*100:.2f}%")
 
 # ─────────────────────────────────────────────────
-# STEP 3 — Save to HDF5
+# STEP 2 — PASS 2: Transform each file and append
+#           results to the output HDF5 one chunk at a time.
+#
+#   Each file is loaded, transformed to (400, 6000), saved,
+#   then discarded — peak RAM ≈ ~2 × 960 MB.
 # ─────────────────────────────────────────────────
 print()
 print("=" * 60)
-print("STEP 3: Saving PCA features to HDF5")
+print("STEP 2 (Pass 2 of 2): Transforming and saving to HDF5")
+print(f"  Output: {PCA_OUTPUT_PATH}")
 print("=" * 60)
 
-# Build a clean DataFrame: columns 0..5999 are PCA components, 'label' is class
-df_pca = pd.DataFrame(X_pca, columns=[f"pc{i}" for i in range(N_PCA_COMPONENTS)])
-df_pca["label"] = y
+col_names = [f"pc{i}" for i in range(N_PCA_COMPONENTS)]
+first_write = True
 
-print(f"  Output DataFrame shape: {df_pca.shape}")
-print(f"  Saving to: {PCA_OUTPUT_PATH}")
+t0 = time.time()
+for i, (fpath, label_idx) in enumerate(file_label_pairs):
+    df = pd.read_hdf(fpath, key="data")          # (400, 600000)
+    X_chunk = ipca.transform(df.values)       # (400, 6000)
+    del df
 
-df_pca.to_hdf(PCA_OUTPUT_PATH, key="data", mode="w")
+    df_chunk = pd.DataFrame(X_chunk, columns=col_names)
+    df_chunk["label"] = label_idx
+    del X_chunk
 
-print("\n  ✅ Saved successfully!")
+    if first_write:
+        # mode="w" creates (or overwrites) the output file
+        df_chunk.to_hdf(PCA_OUTPUT_PATH, key="data", mode="w",
+                        format="table", data_columns=["label"])
+        first_write = False
+    else:
+        # mode="a" + append=True adds rows to the existing table
+        df_chunk.to_hdf(PCA_OUTPUT_PATH, key="data", mode="a",
+                        append=True, format="table", data_columns=["label"])
 
+    del df_chunk
+    print(f"  [{i+1:03d}/{total_files}] saved: {os.path.basename(fpath)}"
+          f"  rows {i*400}–{(i+1)*400-1}  (label {label_idx})")
 
+print(f"\nTransform + save done in {time.time()-t0:.1f}s")
+print(f"\n✅ Done! PCA features saved to: {PCA_OUTPUT_PATH}")
