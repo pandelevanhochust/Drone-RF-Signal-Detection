@@ -34,17 +34,18 @@ def compute_spectrogram_efficient(file_path, sample_rate, center_freq, duration_
     return f, t, Zxx
 
 # --- Execution ---
-FILE_PATH = r"1toan.bin"
-# FILE_PATH = r"DJI_B1_21_04_2026/dji_hover_up.bin"
-FS = 28e6
-CENTER_FREQ = 2.445e9
+# FILE_PATH = r"1toan.bin"
+# FILE_PATH = r"DJI_B1_23_04/dji_hover_up.bin"
+FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa50_low.bin"
+FS = 60e6
+CENTER_FREQ = 2.45e9
 
 # FILE_PATH = r"MAV_1110_04.dat"
 # FS = 60e6
 # CENTER_FREQ = 2.4375e9
 
 # Let's just look at the first 20ms to save memory
-f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ, duration_ms=100)
+f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ, duration_ms=200)
 
 # Convert to dB
 spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
@@ -55,7 +56,7 @@ extent = [t[0] * 1000, t[-1] * 1000, (f[0] + CENTER_FREQ) / 1e6, (f[-1] + CENTER
 
 plt.imshow(spec_db, aspect='auto', extent=extent, origin='lower', cmap='jet')
 filename = os.path.basename(FILE_PATH)
-plt.title(f"Spectrogram: {filename}")
+plt.title(f"Spectrogram: {FILE_PATH}")
 plt.xlabel("Time (ms)")
 plt.ylabel("Frequency (MHz)")
 plt.colorbar(label="Intensity (dB)")
