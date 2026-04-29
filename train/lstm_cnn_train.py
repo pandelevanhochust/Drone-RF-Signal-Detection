@@ -3,18 +3,18 @@ lstm_cnn_train.py
 ==================
 Trains a CNN + LSTM model on the PCA-reduced features stored in pca_features.h5.
 
-Architecture (mirrors the "LSTM + CNN based model" from Classification.ipynb,
-adapted for 399 PCA features instead of 6 000 raw features):
+Architecture (adapted for 399 PCA features):
 
     Input (399, 1)
-    ─── LFLB1: Conv1D(128, 3) → BN → ELU → MaxPool1D(2)
-    ─── LFLB2: Conv1D(128, 3) → BN → ELU → MaxPool1D(2)
-    ─── LFLB3: Conv1D(128, 3) → BN → ELU → MaxPool1D(2)
-    ─── LSTM(64)
-    ─── Dropout(0.3)
-    ─── Dense(64, relu)
-    ─── Dropout(0.3)
+    ─── LFLB1: Conv1D(64, 3) → BN → ReLU → MaxPool1D(3)  → 133 steps
+    ─── LFLB2: Conv1D(128, 3) → BN → ReLU → MaxPool1D(3) →  44 steps
+    ─── LSTM(128, return_sequences=False)
+    ─── Dropout(0.4)
+    ─── Dense(128, relu) → Dropout(0.3)
     ─── Dense(n_classes, softmax)
+
+  Only 2 pooling blocks so the LSTM sees 44 meaningful timesteps
+  (not 24 from 4 pools), preventing information loss on short sequences.
 
 Output files
 ────────────
@@ -54,7 +54,7 @@ from sklearn.metrics import (
 # CONFIGURATION  ← edit these paths to match your environment
 # ─────────────────────────────────────────────────────────────────────────────
 
-PCA_PATH       = "/mnt/c/Users/navis/toanlv/core/pca_features.h5"  # input  HDF5
+PCA_PATH       = "F:/Drone_hdf_5ms/pca_features.h5"   # input  HDF5
 MODEL_OUT      = "lstm_cnn_model.keras"                # saved model
 HISTORY_OUT    = "lstm_cnn_history.npy"                # training history
 SCALER_OUT     = "lstm_cnn_scaler.pkl"                 # StandardScaler
@@ -62,9 +62,9 @@ SCALER_OUT     = "lstm_cnn_scaler.pkl"                 # StandardScaler
 # Training hyper-parameters
 TEST_SIZE      = 0.20
 RANDOM_SEED    = 42
-BATCH_SIZE     = 32
-EPOCHS         = 30
-LEARNING_RATE  = 1e-3
+BATCH_SIZE     = 64       # larger batch → more stable gradients
+EPOCHS         = 50       # EarlyStopping will cut short if needed
+LEARNING_RATE  = 5e-4     # lower LR → smoother convergence
 
 # Class names matching the FOLDERS list in pca_build_dataset.py
 CLASS_NAMES = [
@@ -147,16 +147,14 @@ print(f"\n  X_train reshaped: {X_train.shape}")
 print(f"  y_train one-hot : {y_train_cat.shape}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. BUILD MODEL — CNN (4× LFLB) + LSTM
+# 5. BUILD MODEL — 2× LFLB CNN + LSTM
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#  We use 4 Local Feature Learning Blocks (LFLB) each containing:
-#      Conv1D → BatchNorm → ELU activation → MaxPool1D
-#  followed by an LSTM layer to capture sequential dependencies,
-#  then fully-connected head.
+#  Input length 399.  We use only 2 pooling blocks (pool_size=3) so the
+#  sequence fed to the LSTM is still 44 timesteps — enough for meaningful
+#  temporal modelling without discarding too much information.
 #
-#  Pool sizes are halved (2 instead of 4) because the PCA input (399)
-#  is much shorter than the original 6 000-feature sequences.
+#    399 → Conv/Pool(3) → 133 → Conv/Pool(3) → 44 → LSTM → Dense
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("\n" + "=" * 60)
@@ -167,37 +165,25 @@ inp_shape = (n_features, 1)   # (399, 1)
 
 model = Sequential(name="CNN_LSTM_UAV")
 
-# ── LFLB 1 ──────────────────────────────────────────────────────────────────
+# ── LFLB 1: 399 → 133 ───────────────────────────────────────────────────────
 model.add(Input(shape=inp_shape))
+model.add(Conv1D(filters=64, kernel_size=3, strides=1, padding="same"))
+model.add(BatchNormalization())
+model.add(keras.layers.Activation("relu"))
+model.add(MaxPooling1D(pool_size=3, strides=3))
+
+# ── LFLB 2: 133 → 44 ────────────────────────────────────────────────────────
 model.add(Conv1D(filters=128, kernel_size=3, strides=1, padding="same"))
 model.add(BatchNormalization())
-model.add(keras.layers.Activation("elu"))
-model.add(MaxPooling1D(pool_size=2, strides=2))
+model.add(keras.layers.Activation("relu"))
+model.add(MaxPooling1D(pool_size=3, strides=3))
 
-# ── LFLB 2 ──────────────────────────────────────────────────────────────────
-model.add(Conv1D(filters=128, kernel_size=3, strides=1, padding="same"))
-model.add(BatchNormalization())
-model.add(keras.layers.Activation("elu"))
-model.add(MaxPooling1D(pool_size=2, strides=2))
-
-# ── LFLB 3 ──────────────────────────────────────────────────────────────────
-model.add(Conv1D(filters=128, kernel_size=3, strides=1, padding="same"))
-model.add(BatchNormalization())
-model.add(keras.layers.Activation("elu"))
-model.add(MaxPooling1D(pool_size=2, strides=2))
-
-# ── LFLB 4 ──────────────────────────────────────────────────────────────────
-model.add(Conv1D(filters=128, kernel_size=3, strides=1, padding="same"))
-model.add(BatchNormalization())
-model.add(keras.layers.Activation("elu"))
-model.add(MaxPooling1D(pool_size=2, strides=2))
-
-# ── LSTM ─────────────────────────────────────────────────────────────────────
-model.add(LSTM(units=64))
-model.add(Dropout(0.3))
+# ── LSTM: reads 44 timesteps of 128 channels ─────────────────────────────────
+model.add(LSTM(units=128))
+model.add(Dropout(0.4))
 
 # ── Fully Connected Head ──────────────────────────────────────────────────────
-model.add(Dense(64, activation="relu"))
+model.add(Dense(128, activation="relu"))
 model.add(Dropout(0.3))
 model.add(Dense(n_classes, activation="softmax"))
 
@@ -210,13 +196,27 @@ model.compile(
 model.summary()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. CALLBACKS
+# 6. CLASS WEIGHTS  (handles imbalanced classes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from sklearn.utils.class_weight import compute_class_weight
+
+class_weights_arr = compute_class_weight(
+    class_weight="balanced",
+    classes=np.unique(y_train),
+    y=y_train
+)
+class_weight_dict = dict(enumerate(class_weights_arr))
+print("  Class weights computed.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
 
 callbacks = [
     EarlyStopping(
-        monitor="val_loss",
-        patience=6,
+        monitor="val_accuracy",   # stop when val_accuracy stops improving
+        patience=10,              # wait 10 epochs before giving up
         restore_best_weights=True,
         verbose=1
     ),
@@ -229,7 +229,7 @@ callbacks = [
     ReduceLROnPlateau(
         monitor="val_loss",
         factor=0.5,
-        patience=3,
+        patience=5,
         min_lr=1e-6,
         verbose=1
     ),
@@ -250,6 +250,7 @@ history = model.fit(
     batch_size=BATCH_SIZE,
     validation_data=(X_test, y_test_cat),
     callbacks=callbacks,
+    class_weight=class_weight_dict,   # compensate for class imbalance
     verbose=1
 )
 elapsed = time.time() - t0
