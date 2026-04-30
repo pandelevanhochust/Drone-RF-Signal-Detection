@@ -39,7 +39,7 @@ from sklearn.metrics import (
 # CONFIGURATION  ← must match lstm_cnn_train.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-PCA_PATH    = "/mnt/c/Users/navis/toanlv/core/pca_features.h5"   # same HDF5 used for training
+PCA_PATH    = "D:\CODIng\Thesis\SpectrumAnalyzer\pca_features.h5"   # input  HDF5
 MODEL_PATH  = "lstm_cnn_model.keras"                # saved by ModelCheckpoint
 SCALER_PATH = "lstm_cnn_scaler.pkl"                 # fitted StandardScaler
 
