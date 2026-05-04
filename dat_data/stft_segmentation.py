@@ -134,14 +134,13 @@ def process_one_file(task: dict) -> tuple[str, list[str], str | None]:
         stem = os.path.splitext(os.path.basename(file_path))[0]
 
         for idx, start in enumerate(sorted(starts_ms)):
+            plt.close('all')  # ensure no stale figure state from previous iterations
             f, t, Zxx = compute_spectrogram(file_path, sample_rate,
                                             start, duration_ms, nfft)
             tag      = f"seg{idx:02d}_start{start:.0f}ms"
             out_name = f"{stem}__{tag}.png"
             out_path = os.path.join(out_dir, out_name)
-            title    = (f"{stem}  |  seg {idx}  |  "
-                        f"start={start:.1f} ms  |  {center_freq/1e9:.4f} GHz")
-            save_spectrogram(f, t, Zxx, center_freq, out_path, title)
+            save_spectrogram(f, t, Zxx, center_freq, out_path)
             saved.append(out_path)
 
     except Exception:
