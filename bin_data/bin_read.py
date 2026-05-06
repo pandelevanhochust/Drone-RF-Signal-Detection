@@ -34,9 +34,9 @@ def compute_spectrogram_efficient(file_path, sample_rate, center_freq, duration_
     return f, t, Zxx
 
 # --- Execution ---
-# FILE_PATH = r"1toan.bin"
+FILE_PATH = r"1toan.bin"
 # FILE_PATH = r"DJI_B1_23_04/dji_hover_up.bin"
-FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa50_low.bin"
+# FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa50_low.bin"
 FS = 60e6
 CENTER_FREQ = 2.45e9
 

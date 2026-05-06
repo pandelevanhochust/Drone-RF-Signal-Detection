@@ -3,18 +3,22 @@ import matplotlib.pyplot as plt
 from scipy.signal import stft, windows
 
 
-def compute_spectrogram_efficient(file_path, sample_rate, center_freq, duration_ms=10, nfft=4096):
+def compute_spectrogram_efficient(file_path, sample_rate, center_freq,start_ms=0, duration_ms=10, nfft=1024):
     # 1. Calculate how many samples to read
     # Each sample is 4 bytes (2 bytes for I, 2 bytes for Q)
+    skip_num_samples = int(sample_rate * (start_ms / 1000))
     num_samples = int(sample_rate * (duration_ms / 1000))
 
     # 2. Use memmap to "link" the file without loading it all
     # dtype is float32 bcs GNU Radio
+    start_idx = 2 * skip_num_samples
+    end_idx = start_idx + (2 * num_samples)
+
     data_map = np.memmap(file_path, dtype=np.float32, mode='r')
 
     # 3. Pull only the slice we need (I and Q are interleaved)
     # Total integers to pull = 2 * num_samples
-    raw_chunk = data_map[:2 * num_samples]
+    raw_chunk = data_map[start_idx:end_idx]
 
     # 4. Convert only this chunk to complex
     i_ch = raw_chunk[0::2]
@@ -31,16 +35,17 @@ def compute_spectrogram_efficient(file_path, sample_rate, center_freq, duration_
     f = np.fft.fftshift(f)
     Zxx = np.fft.fftshift(Zxx, axes=0)
 
-    return f, t, Zxx
+    return f, t + (start_ms / 1000), Zxx
 
 
 # --- Execution ---
-FILE_PATH = r"droneV2_data/MAV_1110_02.dat"
+FILE_PATH = r"droneV2_data/MAV_1110_00.dat"
+# FILE_PATH = r"droneV2_data/DIS_0010_03.dat"
 FS = 60e6
-CENTER_FREQ = 2.445e9
+CENTER_FREQ = 2.4375e9
 
 # Let's just look at the first 20ms to save memory
-f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ, duration_ms=100)
+f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ,200, duration_ms=80)
 
 # Convert to dB
 spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
@@ -49,7 +54,7 @@ spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
 plt.figure(figsize=(12, 6))
 extent = [t[0] * 1000, t[-1] * 1000, (f[0] + CENTER_FREQ) / 1e6, (f[-1] + CENTER_FREQ) / 1e6]
 
-plt.imshow(spec_db, aspect='auto', extent=extent, origin='lower', cmap='jet')
+plt.imshow(spec_db, aspect='auto', extent=extent, origin='lower', cmap='viridis')
 plt.title(f"BladeRF Spectrogram (20ms Slice at {CENTER_FREQ / 1e9} GHz)")
 plt.xlabel("Time (ms)")
 plt.ylabel("Frequency (MHz)")

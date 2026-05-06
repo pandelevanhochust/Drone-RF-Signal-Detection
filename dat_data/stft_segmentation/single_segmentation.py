@@ -38,7 +38,6 @@ def compute_spectrogram(file_path: str,
                         nfft: int = 1024):
     """
     Read one time slice of an IQ .dat file and return (f, t, Zxx).
-
     The file stores interleaved float32 I/Q samples (GNU Radio convention).
     """
     skip_samples = int(sample_rate * (start_ms / 1000.0))
@@ -88,7 +87,7 @@ def segment_file(file_path: str,
                  center_freq: float = 2.4375e9,
                  duration_ms: float = 80.0,
                  nfft: int = 1024,
-                 n_segments: int | None = None,   # None → random 2 or 3
+                 n_segments: int | None = None,
                  seed: int | None = None) -> None:
 
     if seed is not None:

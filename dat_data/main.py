@@ -57,17 +57,17 @@ def get_args():
 # Helpers
 # ═════════════════════════════════════════════════════════════════════════════
 
+# randomness
 def set_seed(seed: int):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
+    torch.manual_seed(seed) #CPU randomness
+    torch.cuda.manual_seed_all(seed) #GPU randomness
+    np.random.seed(seed) #Numpy Randomness
 
-
+# Save and load training after 10 epoches
 def save_checkpoint(state: dict, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
     print(f"    [✓] Checkpoint saved → {path}")
-
 
 def load_checkpoint(path: str, model, optimizer, scheduler, device):
     print(f"  Loading checkpoint: {path}")
@@ -81,12 +81,11 @@ def load_checkpoint(path: str, model, optimizer, scheduler, device):
           f"best_val_acc={best_val_acc:.2f}%")
     return start_epoch, best_val_acc
 
-
+# time
 def format_time(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:02d}h {m:02d}m {s:02d}s" if h else f"{m:02d}m {s:02d}s"
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # One epoch of training

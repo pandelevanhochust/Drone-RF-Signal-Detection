@@ -4,7 +4,7 @@ from scipy.signal import stft, windows
 import os
 
 
-def compute_spectrogram_final(file_path, sample_rate, center_freq, start_ms=0, duration_ms=200, nfft=1024):
+def compute_spectrogram_final(file_path, sample_rate, center_freq, start_ms=0, duration_ms=80, nfft=1024):
     # Calculate how many SAMPLES to skip and how many to read
     samples_to_skip = int(sample_rate * (start_ms / 1000))
     samples_to_read = int(sample_rate * (duration_ms / 1000))
@@ -34,8 +34,8 @@ def compute_spectrogram_final(file_path, sample_rate, center_freq, start_ms=0, d
 
 
 # --- Execution ---
-# FILE_PATH = r"../2toan.bin"
-FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa100_low.bin"
+FILE_PATH = r"1toan.bin"
+# FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa100_low.bin"
 # FILE_PATH = r"DJI_B1_23_04/dji_fly50_up.bin"
 
 FS = 60e6
@@ -45,7 +45,7 @@ CENTER_FREQ = 2.45e9
 # FS = 60e6
 # CENTER_FREQ = 2.375e9
 
-f, t, Zxx = compute_spectrogram_final(FILE_PATH, FS, CENTER_FREQ,start_ms=1000,duration_ms=200)
+f, t, Zxx = compute_spectrogram_final(FILE_PATH, FS, CENTER_FREQ,start_ms=0,duration_ms=80)
 
 # Convert to dB
 spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-12)
@@ -56,7 +56,7 @@ extent = [t[0] * 1000, t[-1] * 1000, (f[0] + CENTER_FREQ) / 1e6, (f[-1] + CENTER
 # 3. SET LIMITS (vmin and vmax) to clean up the "Green" noise
 # This forces the background to be blue
 plt.imshow(spec_db, aspect='auto', extent=extent, origin='lower',
-           cmap='jet', vmin=-120, vmax=-40)
+           cmap='viridis')
 
 filename = os.path.basename(FILE_PATH)
 plt.title(f"Spectrogram: {filename}")
