@@ -59,7 +59,7 @@ def get_args():
 
 # randomness
 def set_seed(seed: int):
-    torch.manual_seed(seed) #CPU randomness
+    torch.manual_seed(seed) #CPU randomnessx`
     torch.cuda.manual_seed_all(seed) #GPU randomness
     np.random.seed(seed) #Numpy Randomness
 
@@ -380,19 +380,19 @@ def main():
             )
 
         # ── Save latest checkpoint every 5 epochs ────────────────────────────
-        if epoch % 5 == 0:
-            save_checkpoint(
-                {
-                    "epoch"           : epoch,
-                    "model_state"     : model.state_dict(),
-                    "optimizer_state" : optimizer.state_dict(),
-                    "scheduler_state" : scheduler.state_dict(),
-                    "best_val_acc"    : best_val_acc,
-                    "meta"            : meta,
-                    "args"            : vars(args),
-                },
-                path=os.path.join(args.checkpoint_dir, f"epoch_{epoch:03d}.pth"),
-            )
+        # if epoch % 5 == 0:
+        #     save_checkpoint(
+        #         {
+        #             "epoch"           : epoch,
+        #             "model_state"     : model.state_dict(),
+        #             "optimizer_state" : optimizer.state_dict(),
+        #             "scheduler_state" : scheduler.state_dict(),
+        #             "best_val_acc"    : best_val_acc,
+        #             "meta"            : meta,
+        #             "args"            : vars(args),
+        #         },
+        #         path=os.path.join(args.checkpoint_dir, f"epoch_{epoch:03d}.pth"),
+        #     )
 
         print()  # blank line between epochs
 
