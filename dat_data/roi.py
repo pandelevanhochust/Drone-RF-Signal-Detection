@@ -230,7 +230,7 @@ class ROIExtractor(nn.Module):
     def __init__(
         self,
         output_size: tuple[int, int] = (224, 224),
-        threshold: float = 0.5,
+        threshold: float = 0.7,
         strategy: str = "multiply",
     ):
         super().__init__()
@@ -577,7 +577,7 @@ class DronePipeline(nn.Module):
         in_channels: int       = 3,
         unet_base_filters: int = 64,
         roi_output_size: tuple = (224, 224),
-        mask_threshold: float  = 0.5,
+        mask_threshold: float  = 0.7,
         roi_strategy: str      = "multiply",
         cls_dropout: float     = 0.2,
         cls_drop_connect: float = 0.2,
@@ -721,7 +721,7 @@ if __name__ == "__main__":
         in_channels       = IN_CHANNELS,
         unet_base_filters = 64,
         roi_output_size   = (224, 224),
-        mask_threshold    = 0.5,
+        mask_threshold    = 0.7,
         roi_strategy      = "multiply",
     ).to(device)
 

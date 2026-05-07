@@ -86,7 +86,7 @@ CLASS_NAMES: list[str] = sorted([
     "MIN_FY", "MIN_HO", "MIN_ON",
     "MP1_FY", "MP1_HO", "MP1_ON",
     "MP2_FY", "MP2_HO", "MP2_ON",
-    "PHA_FY", "PHA_HO", "PHA_ON",
+    "PHA_FY", "PHA_HO", "PHA_ON","NO_DRONE"
 ])
 
 # Top-level subset folders available in the dataset
