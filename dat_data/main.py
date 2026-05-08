@@ -413,13 +413,13 @@ def main():
             f"  time={format_time(train_metrics['time'])}"
         )
 
-        # # Per-class accuracy every 10 epochs
-        # if epoch % 10 == 0:
-        #     print("  Per-class val accuracy:")
-        #     for cls_idx, acc in sorted(val_metrics["per_class_acc"].items()):
-        #         cls_name = meta["class_names"][cls_idx]
-        #         bar = "█" * int(acc / 5)
-        #         print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
+        # Per-class accuracy every 10 epochs
+        if epoch % 10 == 0:
+            print("  Per-class val accuracy:")
+            for cls_idx, acc in sorted(val_metrics["per_class_acc"].items()):
+                cls_name = meta["class_names"][cls_idx]
+                bar = "█" * int(acc / 5)
+                print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
 
         # Save best checkpoint
         if val_metrics["acc"] > best_val_acc:
