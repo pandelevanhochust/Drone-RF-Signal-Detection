@@ -1,8 +1,19 @@
 """
-main.py
-=======
-Full training script for the Drone Detection Pipeline:
-    DroneROIUNet (segmentation) + DroneCLSNet (EfficientNet-B0 classification)
+main.py  (refactored)
+======================
+Changes from previous version
+------------------------------
+Strategy 4 — Proxy mask is now NO_DRONE-aware.
+    When the ground-truth label is NO_DRONE (index looked up from meta),
+    the gt_mask is forced to all-zeros so the U-Net learns that there is
+    no drone ROI to segment in background-only samples.
+
+    Additionally, model() now returns raw logits (Softmax removed from
+    DroneCLSNet), so argmax and CrossEntropyLoss are applied to logits
+    directly — no double-softmax.
+
+All other training logic (cosine LR, gradient clipping, checkpointing,
+per-class accuracy, history saving) is unchanged.
 
 Usage:
     python main.py
@@ -32,24 +43,22 @@ from roi import DronePipeline, PipelineLoss
 
 def get_args():
     p = argparse.ArgumentParser(description="Train Drone Detection Pipeline")
-    p.add_argument("--root",         default="output_spectrograms/")
-    p.add_argument("--subsets",      nargs="+", default=["BOTH", "CLEAN"])
-    p.add_argument("--img_size",     nargs=2, type=int, default=[256, 512])
-    p.add_argument("--batch_size",   type=int,   default=16)
-    p.add_argument("--epochs",       type=int,   default=50)
-    p.add_argument("--lr",           type=float, default=1e-4)
-    p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--seg_weight",   type=float, default=1.0,
-                   help="Weight for segmentation (BCE) loss")
-    p.add_argument("--cls_weight",   type=float, default=1.0,
-                   help="Weight for classification (CrossEntropy) loss")
-    p.add_argument("--workers",      type=int,   default=4)
-    p.add_argument("--resume",       default=None,
-                   help="Path to checkpoint to resume from")
-    p.add_argument("--checkpoint_dir", default="checkpoints/")
-    p.add_argument("--log_interval", type=int, default=10,
-                   help="Print loss every N batches")
-    p.add_argument("--seed",         type=int, default=42)
+    p.add_argument("--root",              default="output_spectrograms/")
+    p.add_argument("--subsets",           nargs="+", default=["BOTH"])
+    p.add_argument("--img_size",          nargs=2, type=int, default=[256, 512])
+    p.add_argument("--batch_size",        type=int,   default=16)
+    p.add_argument("--epochs",            type=int,   default=50)
+    p.add_argument("--lr",                type=float, default=1e-4)
+    p.add_argument("--weight_decay",      type=float, default=1e-4)
+    p.add_argument("--seg_weight",        type=float, default=1.0)
+    p.add_argument("--cls_weight",        type=float, default=1.0)
+    p.add_argument("--workers",           type=int,   default=4)
+    p.add_argument("--unet_base_filters", type=int,   default=32,
+                   help="U-Net base filter count. 32≈8M params (default), 64≈31M params.")
+    p.add_argument("--resume",            default=None)
+    p.add_argument("--checkpoint_dir",    default="checkpoints/")
+    p.add_argument("--log_interval",      type=int,   default=10)
+    p.add_argument("--seed",              type=int,   default=42)
     return p.parse_args()
 
 
@@ -57,17 +66,20 @@ def get_args():
 # Helpers
 # ═════════════════════════════════════════════════════════════════════════════
 
-# randomness
 def set_seed(seed: int):
-    torch.manual_seed(seed) #CPU randomnessx`
-    torch.cuda.manual_seed_all(seed) #GPU randomness
-    np.random.seed(seed) #Numpy Randomness
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    # Full determinism on GPU (slight speed cost)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
 
-# Save and load training after 10 epoches
+
 def save_checkpoint(state: dict, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
     print(f"    [✓] Checkpoint saved → {path}")
+
 
 def load_checkpoint(path: str, model, optimizer, scheduler, device):
     print(f"  Loading checkpoint: {path}")
@@ -81,25 +93,70 @@ def load_checkpoint(path: str, model, optimizer, scheduler, device):
           f"best_val_acc={best_val_acc:.2f}%")
     return start_epoch, best_val_acc
 
-# time
+
 def format_time(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:02d}h {m:02d}m {s:02d}s" if h else f"{m:02d}m {s:02d}s"
 
+
 # ═════════════════════════════════════════════════════════════════════════════
-# One epoch of training
+# ░░  Strategy 4 — NO_DRONE-aware proxy mask builder                       ░░
+# ═════════════════════════════════════════════════════════════════════════════
+
+def build_proxy_mask(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    no_drone_idx: int,
+    threshold: float = 0.7,
+) -> torch.Tensor:
+    """
+    Build the weak-supervision binary mask used as U-Net gt_mask.
+
+    For DRONE samples   : energy-threshold proxy (same as before)
+    For NO_DRONE samples: all-zeros mask  ← Strategy 4
+
+    Args:
+        images       : (B, C, H, W) normalised float tensor
+        labels       : (B,)         integer class labels
+        no_drone_idx : integer label index for the NO_DRONE class
+        threshold    : energy binarisation cutoff (default 0.5)
+
+    Returns:
+        gt_mask : (B, 1, H, W) binary float32 tensor
+    """
+    # ── Energy-threshold proxy (applied to all samples first) ─────────────────
+    energy  = images.mean(dim=1, keepdim=True)                # (B, 1, H, W)
+    e_min   = energy.flatten(1).min(1)[0].view(-1, 1, 1, 1)
+    e_max   = energy.flatten(1).max(1)[0].view(-1, 1, 1, 1)
+    gt_mask = (energy - e_min) / (e_max - e_min + 1e-8)
+    gt_mask = (gt_mask > threshold).float()
+
+    # ── Strategy 4: zero out mask for NO_DRONE samples ────────────────────────
+    # Where the label is NO_DRONE, there is no drone RF region to segment.
+    # Teaching the U-Net to predict an empty mask for these samples makes the
+    # segmentation semantically consistent with the classification task.
+    no_drone_mask = (labels == no_drone_idx)                  # (B,) bool
+    if no_drone_mask.any():
+        gt_mask[no_drone_mask] = 0.0
+
+    return gt_mask
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Training epoch
 # ═════════════════════════════════════════════════════════════════════════════
 
 def train_one_epoch(
     model, loader, criterion, optimizer, device,
-    epoch, total_epochs, log_interval
+    epoch, total_epochs, log_interval,
+    no_drone_idx: int,
 ):
     model.train()
 
-    total_loss   = 0.0
-    total_seg    = 0.0
-    total_cls    = 0.0
+    total_loss    = 0.0
+    total_seg     = 0.0
+    total_cls     = 0.0
     total_correct = 0
     total_samples = 0
     t0 = time.time()
@@ -113,25 +170,19 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
-        # ── Forward pass ─────────────────────────────────────────────────────
-        probs, mask = model(images, return_mask=True)
-        # probs : (B, num_classes)  Softmax
-        # mask  : (B, 1, H, W)     Sigmoid
+        # ── Forward ──────────────────────────────────────────────────────────
+        logits, mask = model(images, return_mask=True)
+        # logits : (B, num_classes)  raw scores — NO softmax
+        # mask   : (B, 1, H, W)     sigmoid output ∈ [0, 1]
 
-        # ── Ground-truth mask ─────────────────────────────────────────────────
-        # NOTE: If you have real pixel-level mask annotations, load them here.
-        # For now we use a proxy: threshold the input spectrogram energy as
-        # a weak supervision signal so the U-Net learns to find bright regions.
+        # ── Proxy gt_mask (Strategy 4: NO_DRONE-aware) ───────────────────────
         with torch.no_grad():
-            # Mean across channels, then normalise to [0,1] → soft energy mask
-            energy  = images.mean(dim=1, keepdim=True)          # (B,1,H,W)
-            e_min   = energy.flatten(1).min(1)[0].view(-1,1,1,1)
-            e_max   = energy.flatten(1).max(1)[0].view(-1,1,1,1)
-            gt_mask = ((energy - e_min) / (e_max - e_min + 1e-8))
-            gt_mask = (gt_mask > 0.5).float()  # binary proxy mask
+            gt_mask = build_proxy_mask(
+                images, labels, no_drone_idx, threshold=0.7
+            )
 
         # ── Loss ─────────────────────────────────────────────────────────────
-        losses = criterion(mask, gt_mask, probs, labels)
+        losses = criterion(mask, gt_mask, logits, labels)
         loss   = losses["total"]
 
         # ── Backward + clip + step ────────────────────────────────────────────
@@ -139,22 +190,19 @@ def train_one_epoch(
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # ── Metrics ──────────────────────────────────────────────────────────
+        # ── Metrics (argmax on logits — no softmax needed for accuracy) ───────
         B = images.size(0)
         total_loss    += loss.item()          * B
         total_seg     += losses["seg"].item() * B
         total_cls     += losses["cls"].item() * B
-        total_correct += (probs.argmax(dim=1) == labels).sum().item()
+        total_correct += (logits.argmax(dim=1) == labels).sum().item()
         total_samples += B
 
-        # ── Progress bar update ───────────────────────────────────────────────
-        running_acc  = 100.0 * total_correct / total_samples
-        running_loss = total_loss / total_samples
         pbar.set_postfix({
-            "loss" : f"{running_loss:.4f}",
-            "acc"  : f"{running_acc:.1f}%",
-            "seg"  : f"{total_seg/total_samples:.4f}",
-            "cls"  : f"{total_cls/total_samples:.4f}",
+            "loss": f"{total_loss/total_samples:.4f}",
+            "acc" : f"{100.*total_correct/total_samples:.1f}%",
+            "seg" : f"{total_seg/total_samples:.4f}",
+            "cls" : f"{total_cls/total_samples:.4f}",
         })
 
     epoch_time = time.time() - t0
@@ -172,16 +220,18 @@ def train_one_epoch(
 # ═════════════════════════════════════════════════════════════════════════════
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, split="Val"):
+def evaluate(
+    model, loader, criterion, device,
+    no_drone_idx: int,
+    split: str = "Val",
+):
     model.eval()
 
     total_loss    = 0.0
     total_correct = 0
     total_samples = 0
-
-    # Per-class tracking for accuracy breakdown
-    class_correct = {}
-    class_total   = {}
+    class_correct: dict[int, int] = {}
+    class_total:   dict[int, int] = {}
 
     pbar = tqdm(loader, desc=f"           [{split:5s}]",
                 leave=True, dynamic_ncols=True)
@@ -190,38 +240,31 @@ def evaluate(model, loader, criterion, device, split="Val"):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        probs, mask = model(images, return_mask=True)
+        logits, mask = model(images, return_mask=True)
 
-        # Proxy mask (same as training)
-        energy  = images.mean(dim=1, keepdim=True)
-        e_min   = energy.flatten(1).min(1)[0].view(-1,1,1,1)
-        e_max   = energy.flatten(1).max(1)[0].view(-1,1,1,1)
-        gt_mask = ((energy - e_min) / (e_max - e_min + 1e-8))
-        gt_mask = (gt_mask > 0.5).float()
+        # Strategy 4: NO_DRONE-aware proxy mask in val/test too (for seg loss)
+        gt_mask = build_proxy_mask(images, labels, no_drone_idx, threshold=0.7)
+        losses  = criterion(mask, gt_mask, logits, labels)
 
-        losses = criterion(mask, gt_mask, probs, labels)
-
-        B = images.size(0)
-        total_loss    += losses["total"].item() * B
-        preds          = probs.argmax(dim=1)
+        B             = images.size(0)
+        total_loss   += losses["total"].item() * B
+        preds         = logits.argmax(dim=1)
         total_correct += (preds == labels).sum().item()
         total_samples += B
 
-        # Per-class accuracy
         for pred, lbl in zip(preds.cpu().tolist(), labels.cpu().tolist()):
             class_total[lbl]   = class_total.get(lbl, 0) + 1
-            class_correct[lbl] = class_correct.get(lbl, 0) + (pred == lbl)
+            class_correct[lbl] = class_correct.get(lbl, 0) + int(pred == lbl)
 
         pbar.set_postfix({
-            "loss" : f"{total_loss/total_samples:.4f}",
-            "acc"  : f"{100.*total_correct/total_samples:.1f}%",
+            "loss": f"{total_loss/total_samples:.4f}",
+            "acc" : f"{100.*total_correct/total_samples:.1f}%",
         })
 
     per_class_acc = {
         k: 100.0 * class_correct.get(k, 0) / v
         for k, v in class_total.items()
     }
-
     return {
         "loss"          : total_loss / total_samples,
         "acc"           : 100.0 * total_correct / total_samples,
@@ -238,18 +281,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    # ── Header ───────────────────────────────────────────────────────────────
     sep = "═" * 65
     print(f"\n{sep}")
-    print("  Drone Detection Pipeline — Training")
+    print("  Drone Detection Pipeline — Training  (refactored)")
     print(f"{sep}")
-    print(f"  Device       : {device}"
-          + (f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
-    print(f"  Subsets      : {args.subsets}")
-    print(f"  Image size   : {tuple(args.img_size)}")
-    print(f"  Batch size   : {args.batch_size}")
-    print(f"  Epochs       : {args.epochs}")
-    print(f"  LR           : {args.lr}")
+    print(f"  Device           : {device}"
+          + (f"  ({torch.cuda.get_device_name(0)})"
+             if device.type == "cuda" else ""))
+    print(f"  Subsets          : {args.subsets}")
+    print(f"  Image size       : {tuple(args.img_size)}")
+    print(f"  Batch size       : {args.batch_size}")
+    print(f"  Epochs           : {args.epochs}")
+    print(f"  LR               : {args.lr}")
+    print(f"  UNet base filters: {args.unet_base_filters}  "
+          f"(~{8 if args.unet_base_filters==32 else 31}M params)")
     print(f"{sep}\n")
 
     # ── Step 1: Data ──────────────────────────────────────────────────────────
@@ -262,6 +307,17 @@ def main():
         num_workers = args.workers,
         seed        = args.seed,
     )
+
+    # ── Resolve NO_DRONE label index ─────────────────────────────
+    class_to_idx  = meta["class_to_idx"]
+    no_drone_idx  = class_to_idx.get("NO_DRONE", -1)
+    if no_drone_idx == -1:
+        print("  WARNING: 'NO_DRONE' class not found in dataset. "
+              "NO_DRONE mask zeroing will be skipped.")
+    else:
+        print(f"  NO_DRONE label index : {no_drone_idx}  "
+              f"(proxy mask will be zeroed for this class)")
+
     print(f"  Classes      : {meta['num_classes']}  →  {meta['class_names']}")
     print(f"  Train        : {meta['n_train']} samples  "
           f"({len(train_loader)} batches)")
@@ -275,9 +331,11 @@ def main():
     model = DronePipeline(
         num_classes       = meta["num_classes"],
         in_channels       = 3,
-        unet_base_filters = 64,
+        unet_base_filters = args.unet_base_filters,
+        # 64: 31M  parameters
+        # 32: 8M parameters
         roi_output_size   = (224, 224),
-        mask_threshold    = 0.5,
+        mask_threshold    = 0.7,
         roi_strategy      = "multiply",
     ).to(device)
 
@@ -295,7 +353,7 @@ def main():
     )
     scheduler = CosineAnnealingLR(
         optimizer,
-        T_max  = args.epochs,
+        T_max   = args.epochs,
         eta_min = 1e-6,
     )
     criterion = PipelineLoss(
@@ -303,16 +361,15 @@ def main():
         cls_weight = args.cls_weight,
     )
 
-    # ── Resume from checkpoint ────────────────────────────────────────────────
+    # ── Resume ────────────────────────────────────────────────────────────────
     start_epoch  = 1
     best_val_acc = 0.0
-
     if args.resume:
         start_epoch, best_val_acc = load_checkpoint(
             args.resume, model, optimizer, scheduler, device
         )
 
-    # ── History storage ───────────────────────────────────────────────────────
+    # ── History ───────────────────────────────────────────────────────────────
     history = {
         "train_loss": [], "train_acc": [],
         "val_loss":   [], "val_acc":   [],
@@ -325,20 +382,21 @@ def main():
 
     for epoch in range(start_epoch, args.epochs + 1):
 
-        # ── Train ─────────────────────────────────────────────────────────────
         train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer,
-            device, epoch, args.epochs, args.log_interval,
+            model, train_loader, criterion, optimizer, device,
+            epoch, args.epochs, args.log_interval,
+            no_drone_idx=no_drone_idx,
         )
 
-        # ── Validate ──────────────────────────────────────────────────────────
-        val_metrics = evaluate(model, val_loader, criterion, device, split="Val")
+        val_metrics = evaluate(
+            model, val_loader, criterion, device,
+            no_drone_idx=no_drone_idx,
+            split="Val",
+        )
 
-        # ── Scheduler step ────────────────────────────────────────────────────
         scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
 
-        # ── Log ───────────────────────────────────────────────────────────────
         history["train_loss"].append(train_metrics["loss"])
         history["train_acc"].append(train_metrics["acc"])
         history["val_loss"].append(val_metrics["loss"])
@@ -355,15 +413,15 @@ def main():
             f"  time={format_time(train_metrics['time'])}"
         )
 
-        # ── Per-class accuracy every 10 epochs ───────────────────────────────
-        if epoch % 10 == 0:
-            print("  Per-class val accuracy:")
-            for cls_idx, acc in sorted(val_metrics["per_class_acc"].items()):
-                cls_name = meta["class_names"][cls_idx]
-                bar = "█" * int(acc / 5)
-                print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
+        # # Per-class accuracy every 10 epochs
+        # if epoch % 10 == 0:
+        #     print("  Per-class val accuracy:")
+        #     for cls_idx, acc in sorted(val_metrics["per_class_acc"].items()):
+        #         cls_name = meta["class_names"][cls_idx]
+        #         bar = "█" * int(acc / 5)
+        #         print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
 
-        # ── Save best checkpoint ──────────────────────────────────────────────
+        # Save best checkpoint
         if val_metrics["acc"] > best_val_acc:
             best_val_acc = val_metrics["acc"]
             save_checkpoint(
@@ -379,23 +437,6 @@ def main():
                 path=os.path.join(args.checkpoint_dir, "best_model.pth"),
             )
 
-        # ── Save latest checkpoint every 5 epochs ────────────────────────────
-        # if epoch % 5 == 0:
-        #     save_checkpoint(
-        #         {
-        #             "epoch"           : epoch,
-        #             "model_state"     : model.state_dict(),
-        #             "optimizer_state" : optimizer.state_dict(),
-        #             "scheduler_state" : scheduler.state_dict(),
-        #             "best_val_acc"    : best_val_acc,
-        #             "meta"            : meta,
-        #             "args"            : vars(args),
-        #         },
-        #         path=os.path.join(args.checkpoint_dir, f"epoch_{epoch:03d}.pth"),
-        #     )
-
-        print()  # blank line between epochs
-
     total_time = time.time() - total_start
 
     # ── Step 5: Final Test Evaluation ─────────────────────────────────────────
@@ -409,7 +450,11 @@ def main():
         model.load_state_dict(ckpt["model_state"])
         print(f"  Loaded best model from epoch {ckpt['epoch']}")
 
-    test_metrics = evaluate(model, test_loader, criterion, device, split="Test")
+    test_metrics = evaluate(
+        model, test_loader, criterion, device,
+        no_drone_idx=no_drone_idx,
+        split="Test",
+    )
 
     print(f"\n  Test Loss     : {test_metrics['loss']:.4f}")
     print(f"  Test Accuracy : {test_metrics['acc']:.2f}%")
@@ -439,7 +484,6 @@ def main():
               f"  {history['val_acc'][i]:9.1f}%")
     print(f"{sep}\n")
 
-    # ── Save training history ─────────────────────────────────────────────────
     np.save(
         os.path.join(args.checkpoint_dir, "history.npy"),
         history,

@@ -57,7 +57,7 @@ def mask_to_pil(mask: torch.Tensor) -> Image.Image:
     return Image.fromarray(arr, mode="L")
 
 
-def compute_proxy_mask(tensor: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+def compute_proxy_mask(tensor: torch.Tensor, threshold: float = 0.7) -> torch.Tensor:
     """
     Replicates the exact proxy-mask logic from main.py's train_one_epoch().
 
