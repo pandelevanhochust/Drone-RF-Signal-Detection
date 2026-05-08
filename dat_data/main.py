@@ -33,7 +33,7 @@ from roi import DronePipeline, PipelineLoss
 def get_args():
     p = argparse.ArgumentParser(description="Train Drone Detection Pipeline")
     p.add_argument("--root",         default="output_spectrograms/")
-    p.add_argument("--subsets",      nargs="+", default=["BOTH", "CLEAN"])
+    p.add_argument("--subsets",      nargs="+", default=["BOTH"])
     p.add_argument("--img_size",     nargs=2, type=int, default=[256, 512])
     p.add_argument("--batch_size",   type=int,   default=16)
     p.add_argument("--epochs",       type=int,   default=50)

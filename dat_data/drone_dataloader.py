@@ -74,19 +74,21 @@ import torch.nn as nn
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Known class names (20 folders inside each subset)
-# Source: DroneDetect_V2 README / screenshot
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+
+# Old classes:
+#     "AIR_FY", "AIR_HO", "AIR_ON",
+#     "DIS_FY", "DIS_HO", "DIS_ON",
+#     "INS_FY", "INS_HO", "INS_ON",
+#     "MIN_FY", "MIN_HO", "MIN_ON",
+#     "MP1_FY", "MP1_HO", "MP1_ON",
+#     "MP2_FY", "MP2_HO", "MP2_ON",
+#     "PHA_FY", "PHA_HO", "PHA_ON","NO_DRONE"
+
 CLASS_NAMES: list[str] = sorted([
-    "AIR_FY", "AIR_HO", "AIR_ON",
-    "DIS_FY", "DIS_HO", "DIS_ON",      # DIS = Disco / Dissonance variant
-    "INS_FY", "INS_HO", "INS_ON",
-    "MIN_FY", "MIN_HO", "MIN_ON",
-    "MP1_FY", "MP1_HO", "MP1_ON",
-    "MP2_FY", "MP2_HO", "MP2_ON",
-    "PHA_FY", "PHA_HO", "PHA_ON","NO_DRONE"
+    "AIR", "DIS", "INS", "PHA","MP1", "MP2", "MIN","NO_DRONE"
 ])
 
 # Top-level subset folders available in the dataset

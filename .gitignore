@@ -4,3 +4,4 @@
 output
 stft_segments
 non_drone_stft
+*.png

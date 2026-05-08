@@ -34,8 +34,8 @@ def compute_spectrogram_final(file_path, sample_rate, center_freq, start_ms=0, d
 
 
 # --- Execution ---
-FILE_PATH = r"1toan.bin"
-# FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa100_low.bin"
+# FILE_PATH = r"1toan.bin"
+FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa100_low.bin"
 # FILE_PATH = r"DJI_B1_23_04/dji_fly50_up.bin"
 
 FS = 60e6
