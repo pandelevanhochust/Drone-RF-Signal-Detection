@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import stft, windows
 
 
-def compute_spectrogram_efficient(file_path, sample_rate, center_freq,start_ms=0, duration_ms=10, nfft=1024):
+def compute_spectrogram_efficient(file_path, sample_rate, center_freq,start_ms=0, duration_ms=20, nfft=1024):
     # 1. Calculate how many samples to read
     # Each sample is 4 bytes (2 bytes for I, 2 bytes for Q)
     skip_num_samples = int(sample_rate * (start_ms / 1000))
