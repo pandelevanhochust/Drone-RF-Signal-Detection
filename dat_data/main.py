@@ -3,21 +3,21 @@ main.py  (refactored)
 ======================
 Changes from previous version
 ------------------------------
-Strategy 4 — Proxy mask is now NO_DRONE-aware.
-    When the ground-truth label is NO_DRONE (index looked up from meta),
-    the gt_mask is forced to all-zeros so the U-Net learns that there is
-    no drone ROI to segment in background-only samples.
+Strategy 1 -- Recording-level split (in drone_dataloader.py)
+Strategy 2 -- Dropout2d in U-Net bottleneck/decoder (in roi.py)
+Strategy 3 -- unet_base_filters default 32 (in roi.py)
+Strategy 4 -- NO_DRONE-aware proxy mask + Softmax removed from classifier
 
-    Additionally, model() now returns raw logits (Softmax removed from
-    DroneCLSNet), so argmax and CrossEntropyLoss are applied to logits
-    directly — no double-softmax.
-
-All other training logic (cosine LR, gradient clipping, checkpointing,
-per-class accuracy, history saving) is unchanged.
+New in this version
+-------------------
+- Test set file list printed and saved to checkpoints/test_files.txt
+- evaluate() returns per-sample (true, pred, correct) records
+- evaluate_with_filenames() used for final test to show filename-level results
+- tqdm disabled in favour of per-batch print for web SSH compatibility
 
 Usage:
     python main.py
-    python main.py --epochs 50 --batch_size 16 --lr 1e-4
+    python main.py --epochs 70 --batch_size 16 --lr 1e-4
     python main.py --resume checkpoints/best_model.pth
 """
 
@@ -37,40 +37,41 @@ from drone_dataloader import build_dataloaders
 from roi import DronePipeline, PipelineLoss
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # Configuration
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def get_args():
     p = argparse.ArgumentParser(description="Train Drone Detection Pipeline")
     p.add_argument("--root",              default="output_spectrograms/")
-    p.add_argument("--subsets",           nargs="+", default=["BOTH"])
+    p.add_argument("--subsets",           nargs="+", default=["BOTH", "CLEAN"])
     p.add_argument("--img_size",          nargs=2, type=int, default=[256, 512])
     p.add_argument("--batch_size",        type=int,   default=16)
-    p.add_argument("--epochs",            type=int,   default=50)
+    p.add_argument("--epochs",            type=int,   default=70)
     p.add_argument("--lr",                type=float, default=1e-4)
     p.add_argument("--weight_decay",      type=float, default=1e-4)
     p.add_argument("--seg_weight",        type=float, default=1.0)
     p.add_argument("--cls_weight",        type=float, default=1.0)
     p.add_argument("--workers",           type=int,   default=4)
     p.add_argument("--unet_base_filters", type=int,   default=32,
-                   help="U-Net base filter count. 32≈8M params (default), 64≈31M params.")
-    p.add_argument("--resume",            default=None)
+                   help="U-Net base filter count. 32~8M params (default), 64~31M params.")
+    p.add_argument("--resume",            default=None,
+                   help="Path to checkpoint to resume training from.")
     p.add_argument("--checkpoint_dir",    default="checkpoints/")
-    p.add_argument("--log_interval",      type=int,   default=10)
+    p.add_argument("--log_interval",      type=int,   default=50,
+                   help="Print batch metrics every N batches.")
     p.add_argument("--seed",              type=int,   default=42)
     return p.parse_args()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # Helpers
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
-    # Full determinism on GPU (slight speed cost)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark     = False
 
@@ -78,7 +79,7 @@ def set_seed(seed: int):
 def save_checkpoint(state: dict, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
-    print(f"    [✓] Checkpoint saved → {path}")
+    print(f"    [OK] Checkpoint saved -> {path}")
 
 
 def load_checkpoint(path: str, model, optimizer, scheduler, device):
@@ -100,52 +101,48 @@ def format_time(seconds: float) -> str:
     return f"{h:02d}h {m:02d}m {s:02d}s" if h else f"{m:02d}m {s:02d}s"
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# ░░  Strategy 4 — NO_DRONE-aware proxy mask builder                       ░░
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Strategy 4 -- NO_DRONE-aware proxy mask
+# =============================================================================
 
 def build_proxy_mask(
-    images: torch.Tensor,
-    labels: torch.Tensor,
-    no_drone_idx: int,
-    threshold: float = 0.7,
+    images       : torch.Tensor,
+    labels       : torch.Tensor,
+    no_drone_idx : int,
+    threshold    : float = 0.5,
 ) -> torch.Tensor:
     """
-    Build the weak-supervision binary mask used as U-Net gt_mask.
+    Weak-supervision binary mask for U-Net gt_mask.
 
-    For DRONE samples   : energy-threshold proxy (same as before)
-    For NO_DRONE samples: all-zeros mask  ← Strategy 4
+    Drone samples   : energy-threshold proxy (mean channel -> min-max norm -> threshold)
+    NO_DRONE samples: all-zeros mask (no drone RF region to segment)
 
     Args:
         images       : (B, C, H, W) normalised float tensor
-        labels       : (B,)         integer class labels
-        no_drone_idx : integer label index for the NO_DRONE class
+        labels       : (B,) integer class labels
+        no_drone_idx : label index for NO_DRONE class
         threshold    : energy binarisation cutoff (default 0.5)
 
     Returns:
-        gt_mask : (B, 1, H, W) binary float32 tensor
+        gt_mask : (B, 1, H, W) binary float32
     """
-    # ── Energy-threshold proxy (applied to all samples first) ─────────────────
-    energy  = images.mean(dim=1, keepdim=True)                # (B, 1, H, W)
+    energy  = images.mean(dim=1, keepdim=True)
     e_min   = energy.flatten(1).min(1)[0].view(-1, 1, 1, 1)
     e_max   = energy.flatten(1).max(1)[0].view(-1, 1, 1, 1)
     gt_mask = (energy - e_min) / (e_max - e_min + 1e-8)
     gt_mask = (gt_mask > threshold).float()
 
-    # ── Strategy 4: zero out mask for NO_DRONE samples ────────────────────────
-    # Where the label is NO_DRONE, there is no drone RF region to segment.
-    # Teaching the U-Net to predict an empty mask for these samples makes the
-    # segmentation semantically consistent with the classification task.
-    no_drone_mask = (labels == no_drone_idx)                  # (B,) bool
+    # zero out mask for NO_DRONE samples
+    no_drone_mask = (labels == no_drone_idx)
     if no_drone_mask.any():
         gt_mask[no_drone_mask] = 0.0
 
     return gt_mask
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # Training epoch
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def train_one_epoch(
     model, loader, criterion, optimizer, device,
@@ -161,36 +158,37 @@ def train_one_epoch(
     total_samples = 0
     t0 = time.time()
 
-    pbar = tqdm(loader, desc=f"Epoch {epoch:3d}/{total_epochs} [Train]",
-                leave=True, dynamic_ncols=True)
+    pbar = tqdm(
+        loader,
+        desc=f"Epoch {epoch:3d}/{total_epochs} [Train]",
+        leave=True,
+        ascii=True,
+        ncols=100,
+    )
 
     for batch_idx, (images, labels) in enumerate(pbar):
-        images = images.to(device, non_blocking=True)   # (B, 3, H, W)
-        labels = labels.to(device, non_blocking=True)   # (B,)
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
-        # ── Forward ──────────────────────────────────────────────────────────
+        # forward -- logits are raw (no softmax)
         logits, mask = model(images, return_mask=True)
-        # logits : (B, num_classes)  raw scores — NO softmax
-        # mask   : (B, 1, H, W)     sigmoid output ∈ [0, 1]
 
-        # ── Proxy gt_mask (Strategy 4: NO_DRONE-aware) ───────────────────────
+        # build NO_DRONE-aware proxy mask
         with torch.no_grad():
-            gt_mask = build_proxy_mask(
-                images, labels, no_drone_idx, threshold=0.7
-            )
+            gt_mask = build_proxy_mask(images, labels, no_drone_idx, threshold=0.5)
 
-        # ── Loss ─────────────────────────────────────────────────────────────
+        # loss
         losses = criterion(mask, gt_mask, logits, labels)
         loss   = losses["total"]
 
-        # ── Backward + clip + step ────────────────────────────────────────────
+        # backward
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # ── Metrics (argmax on logits — no softmax needed for accuracy) ───────
+        # metrics
         B = images.size(0)
         total_loss    += loss.item()          * B
         total_seg     += losses["seg"].item() * B
@@ -215,9 +213,9 @@ def train_one_epoch(
     }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Validation / Test
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Validation
+# =============================================================================
 
 @torch.no_grad()
 def evaluate(
@@ -225,25 +223,29 @@ def evaluate(
     no_drone_idx: int,
     split: str = "Val",
 ):
+    """Standard evaluation -- returns loss, acc, per_class_acc."""
     model.eval()
 
     total_loss    = 0.0
     total_correct = 0
     total_samples = 0
-    class_correct: dict[int, int] = {}
-    class_total:   dict[int, int] = {}
+    class_correct: dict = {}
+    class_total:   dict = {}
 
-    pbar = tqdm(loader, desc=f"           [{split:5s}]",
-                leave=True, dynamic_ncols=True)
+    pbar = tqdm(
+        loader,
+        desc=f"           [{split:5s}]",
+        leave=True,
+        ascii=True,
+        ncols=100,
+    )
 
     for images, labels in pbar:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
         logits, mask = model(images, return_mask=True)
-
-        # Strategy 4: NO_DRONE-aware proxy mask in val/test too (for seg loss)
-        gt_mask = build_proxy_mask(images, labels, no_drone_idx, threshold=0.7)
+        gt_mask = build_proxy_mask(images, labels, no_drone_idx, threshold=0.5)
         losses  = criterion(mask, gt_mask, logits, labels)
 
         B             = images.size(0)
@@ -272,18 +274,168 @@ def evaluate(
     }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Final test evaluation -- with per-sample filename tracking
+# =============================================================================
+
+@torch.no_grad()
+def evaluate_test(
+    model, loader, criterion, device,
+    no_drone_idx : int,
+    class_names  : list,
+):
+    """
+    Full test evaluation that tracks per-sample predictions alongside
+    the original filenames from the dataset.
+
+    Returns the standard metrics dict plus:
+        "records" : list of dicts with keys:
+                        filename  -- PNG basename
+                        true      -- ground-truth class name
+                        pred      -- predicted class name
+                        correct   -- bool
+                        confidence-- softmax probability of predicted class
+    """
+    model.eval()
+
+    total_loss    = 0.0
+    total_correct = 0
+    total_samples = 0
+    class_correct: dict = {}
+    class_total:   dict = {}
+    records = []
+
+    # get the underlying _TransformSubset to access filenames
+    test_dataset = loader.dataset
+
+    pbar = tqdm(
+        loader,
+        desc="           [ Test]",
+        leave=True,
+        ascii=True,
+        ncols=100,
+    )
+
+    sample_offset = 0   # tracks position in the dataset across batches
+
+    for images, labels in pbar:
+        images = images.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        logits, mask = model(images, return_mask=True)
+        gt_mask = build_proxy_mask(images, labels, no_drone_idx, threshold=0.5)
+        losses  = criterion(mask, gt_mask, logits, labels)
+
+        probs = torch.softmax(logits, dim=1)   # for confidence scores
+        preds = logits.argmax(dim=1)
+
+        B             = images.size(0)
+        total_loss   += losses["total"].item() * B
+        total_correct += (preds == labels).sum().item()
+        total_samples += B
+
+        for i, (pred, lbl) in enumerate(
+            zip(preds.cpu().tolist(), labels.cpu().tolist())
+        ):
+            class_total[lbl]   = class_total.get(lbl, 0) + 1
+            class_correct[lbl] = class_correct.get(lbl, 0) + int(pred == lbl)
+
+            # resolve filename from dataset
+            ds_idx     = sample_offset + i
+            global_idx = test_dataset.subset.indices[ds_idx]
+            img_path, _= test_dataset.subset.dataset.samples[global_idx]
+            filename   = Path(img_path).name
+
+            records.append({
+                "filename"  : filename,
+                "true"      : class_names[lbl],
+                "pred"      : class_names[pred],
+                "correct"   : pred == lbl,
+                "confidence": float(probs[i][pred].item()),
+            })
+
+        sample_offset += B
+
+        pbar.set_postfix({
+            "loss": f"{total_loss/total_samples:.4f}",
+            "acc" : f"{100.*total_correct/total_samples:.1f}%",
+        })
+
+    per_class_acc = {
+        k: 100.0 * class_correct.get(k, 0) / v
+        for k, v in class_total.items()
+    }
+    return {
+        "loss"          : total_loss / total_samples,
+        "acc"           : 100.0 * total_correct / total_samples,
+        "per_class_acc" : per_class_acc,
+        "records"       : records,
+    }
+
+
+# =============================================================================
+# Save test file list
+# =============================================================================
+
+def save_test_file_list(
+    records      : list,
+    checkpoint_dir: str,
+    class_names  : list,
+):
+    """
+    Save a detailed per-sample test result table to:
+        checkpoints/test_files.txt      -- all samples
+        checkpoints/test_wrong.txt      -- misclassified samples only
+
+    Each row: filename | true class | predicted class | correct | confidence
+    """
+    out_dir = Path(checkpoint_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    all_path   = out_dir / "test_files.txt"
+    wrong_path = out_dir / "test_wrong.txt"
+
+    header = (
+        f"{'#':>5}  {'Filename':<55}  {'True':<12}  "
+        f"{'Pred':<12}  {'OK':>4}  {'Conf':>7}\n"
+    )
+    divider = "-" * 105 + "\n"
+
+    with open(all_path, "w") as f_all, open(wrong_path, "w") as f_wrong:
+        f_all.write(header)
+        f_all.write(divider)
+        f_wrong.write("Misclassified samples\n")
+        f_wrong.write(header)
+        f_wrong.write(divider)
+
+        wrong_count = 0
+        for i, r in enumerate(records, 1):
+            ok_str   = "OK" if r["correct"] else "FAIL"
+            line = (
+                f"{i:>5}  {r['filename']:<55}  {r['true']:<12}  "
+                f"{r['pred']:<12}  {ok_str:>4}  {r['confidence']:>6.1%}\n"
+            )
+            f_all.write(line)
+            if not r["correct"]:
+                f_wrong.write(line)
+                wrong_count += 1
+
+    print(f"  Test file list saved -> {all_path}")
+    print(f"  Wrong predictions    -> {wrong_path}  ({wrong_count} samples)")
+
+
+# =============================================================================
 # Main
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def main():
     args   = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    sep = "═" * 65
+    sep = "=" * 65
     print(f"\n{sep}")
-    print("  Drone Detection Pipeline — Training  (refactored)")
+    print("  Drone Detection Pipeline -- Training")
     print(f"{sep}")
     print(f"  Device           : {device}"
           + (f"  ({torch.cuda.get_device_name(0)})"
@@ -293,12 +445,13 @@ def main():
     print(f"  Batch size       : {args.batch_size}")
     print(f"  Epochs           : {args.epochs}")
     print(f"  LR               : {args.lr}")
+    print(f"  Weight decay     : {args.weight_decay}")
     print(f"  UNet base filters: {args.unet_base_filters}  "
-          f"(~{8 if args.unet_base_filters==32 else 31}M params)")
+          f"(~{8 if args.unet_base_filters == 32 else 31}M params)")
     print(f"{sep}\n")
 
     # ── Step 1: Data ──────────────────────────────────────────────────────────
-    print("► Step 1: Loading dataset …")
+    print("► Step 1: Loading dataset ...")
     train_loader, val_loader, test_loader, meta = build_dataloaders(
         root        = args.root,
         subsets     = args.subsets,
@@ -308,34 +461,55 @@ def main():
         seed        = args.seed,
     )
 
-    # ── Resolve NO_DRONE label index ─────────────────────────────
-    class_to_idx  = meta["class_to_idx"]
-    no_drone_idx  = class_to_idx.get("NO_DRONE", -1)
-    if no_drone_idx == -1:
-        print("  WARNING: 'NO_DRONE' class not found in dataset. "
-              "NO_DRONE mask zeroing will be skipped.")
-    else:
-        print(f"  NO_DRONE label index : {no_drone_idx}  "
-              f"(proxy mask will be zeroed for this class)")
+    class_names  = meta["class_names"]
+    class_to_idx = meta["class_to_idx"]
+    no_drone_idx = class_to_idx.get("NO_DRONE", -1)
 
-    print(f"  Classes      : {meta['num_classes']}  →  {meta['class_names']}")
-    print(f"  Train        : {meta['n_train']} samples  "
-          f"({len(train_loader)} batches)")
-    print(f"  Val          : {meta['n_val']} samples  "
-          f"({len(val_loader)} batches)")
-    print(f"  Test         : {meta['n_test']} samples  "
-          f"({len(test_loader)} batches)")
+    if no_drone_idx == -1:
+        print("  WARNING: 'NO_DRONE' not found -- mask zeroing skipped.")
+    else:
+        print(f"  NO_DRONE label index : {no_drone_idx}")
+
+    print(f"  Classes  : {meta['num_classes']}  ->  {class_names}")
+    print(f"  Train    : {meta['n_train']} samples  ({len(train_loader)} batches)")
+    print(f"  Val      : {meta['n_val']} samples  ({len(val_loader)} batches)")
+    print(f"  Test     : {meta['n_test']} samples  ({len(test_loader)} batches)")
+
+    # ── Print and save test file list upfront ─────────────────────────────────
+    print(f"\n  Test set file list:")
+    print(f"  {'#':>5}  {'File':<55}  {'True Class'}")
+    print(f"  {'-'*5}  {'-'*55}  {'-'*12}")
+
+    test_dataset   = test_loader.dataset   # _TransformSubset
+    test_manifest  = []                    # (filename, class_name) for saving
+
+    for i, global_idx in enumerate(test_dataset.subset.indices):
+        img_path, label = test_dataset.subset.dataset.samples[global_idx]
+        cls_name = class_names[label]
+        fname    = Path(img_path).name
+        test_manifest.append((fname, cls_name))
+        print(f"  {i+1:>5}  {fname:<55}  {cls_name}")
+
+    print(f"\n  Total test samples : {len(test_manifest)}")
+
+    # save manifest to disk
+    manifest_path = Path(args.checkpoint_dir) / "test_files_manifest.txt"
+    Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, "w") as f:
+        f.write(f"{'#':>5}  {'File':<60}  {'True Class'}\n")
+        f.write("-" * 80 + "\n")
+        for i, (fname, cls) in enumerate(test_manifest, 1):
+            f.write(f"{i:>5}  {fname:<60}  {cls}\n")
+    print(f"  Manifest saved     -> {manifest_path}")
 
     # ── Step 2: Model ─────────────────────────────────────────────────────────
-    print("\n► Step 2: Building model …")
+    print(f"\n► Step 2: Building model ...")
     model = DronePipeline(
         num_classes       = meta["num_classes"],
         in_channels       = 3,
         unet_base_filters = args.unet_base_filters,
-        # 64: 31M  parameters
-        # 32: 8M parameters
         roi_output_size   = (224, 224),
-        mask_threshold    = 0.7,
+        mask_threshold    = 0.5,
         roi_strategy      = "multiply",
     ).to(device)
 
@@ -345,7 +519,7 @@ def main():
     print(f"  Trainable params : {trainable_params:,}")
 
     # ── Step 3: Optimizer + Scheduler + Loss ──────────────────────────────────
-    print("\n► Step 3: Setting up optimizer …")
+    print(f"\n► Step 3: Setting up optimizer ...")
     optimizer = optim.Adam(
         model.parameters(),
         lr           = args.lr,
@@ -372,12 +546,12 @@ def main():
     # ── History ───────────────────────────────────────────────────────────────
     history = {
         "train_loss": [], "train_acc": [],
-        "val_loss":   [], "val_acc":   [],
-        "lr":         [],
+        "val_loss"  : [], "val_acc"  : [],
+        "lr"        : [],
     }
 
     # ── Step 4: Training Loop ─────────────────────────────────────────────────
-    print(f"\n► Step 4: Training for {args.epochs} epochs …\n")
+    print(f"\n► Step 4: Training for {args.epochs} epochs ...\n")
     total_start = time.time()
 
     for epoch in range(start_epoch, args.epochs + 1):
@@ -413,15 +587,15 @@ def main():
             f"  time={format_time(train_metrics['time'])}"
         )
 
-        # Per-class accuracy every 10 epochs
+        # per-class accuracy every 10 epochs
         if epoch % 10 == 0:
             print("  Per-class val accuracy:")
             for cls_idx, acc in sorted(val_metrics["per_class_acc"].items()):
-                cls_name = meta["class_names"][cls_idx]
-                bar = "█" * int(acc / 5)
+                cls_name = class_names[cls_idx]
+                bar = "#" * int(acc / 5)
                 print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
 
-        # Save best checkpoint
+        # save best checkpoint
         if val_metrics["acc"] > best_val_acc:
             best_val_acc = val_metrics["acc"]
             save_checkpoint(
@@ -437,6 +611,8 @@ def main():
                 path=os.path.join(args.checkpoint_dir, "best_model.pth"),
             )
 
+        print()
+
     total_time = time.time() - total_start
 
     # ── Step 5: Final Test Evaluation ─────────────────────────────────────────
@@ -450,19 +626,35 @@ def main():
         model.load_state_dict(ckpt["model_state"])
         print(f"  Loaded best model from epoch {ckpt['epoch']}")
 
-    test_metrics = evaluate(
+    test_metrics = evaluate_test(
         model, test_loader, criterion, device,
-        no_drone_idx=no_drone_idx,
-        split="Test",
+        no_drone_idx = no_drone_idx,
+        class_names  = class_names,
     )
 
+    # print per-sample results
+    records = test_metrics["records"]
+    print(f"\n  Per-sample test results:")
+    print(f"  {'#':>5}  {'File':<50}  {'True':<12}  {'Pred':<12}  {'OK':>4}  {'Conf':>7}")
+    print(f"  {'-'*5}  {'-'*50}  {'-'*12}  {'-'*12}  {'-'*4}  {'-'*7}")
+    for i, r in enumerate(records, 1):
+        ok_str = "OK" if r["correct"] else "FAIL"
+        print(
+            f"  {i:>5}  {r['filename']:<50}  {r['true']:<12}  "
+            f"{r['pred']:<12}  {ok_str:>4}  {r['confidence']:>6.1%}"
+        )
+
+    # summary metrics
     print(f"\n  Test Loss     : {test_metrics['loss']:.4f}")
     print(f"  Test Accuracy : {test_metrics['acc']:.2f}%")
-    print("\n  Per-class Test Accuracy:")
+    print(f"\n  Per-class Test Accuracy:")
     for cls_idx, acc in sorted(test_metrics["per_class_acc"].items()):
-        cls_name = meta["class_names"][cls_idx]
-        bar = "█" * int(acc / 5)
+        cls_name = class_names[cls_idx]
+        bar = "#" * int(acc / 5)
         print(f"    {cls_name:12s}: {acc:5.1f}%  {bar}")
+
+    # save detailed test results
+    save_test_file_list(records, args.checkpoint_dir, class_names)
 
     # ── Step 6: Summary ───────────────────────────────────────────────────────
     print(f"\n{sep}")
@@ -478,17 +670,16 @@ def main():
     for i in range(max(0, len(history["train_loss"]) - 5),
                    len(history["train_loss"])):
         ep = i + 1
-        print(f"  {ep:6d}  {history['train_loss'][i]:10.4f}"
-              f"  {history['val_loss'][i]:10.4f}"
-              f"  {history['train_acc'][i]:9.1f}%"
-              f"  {history['val_acc'][i]:9.1f}%")
+        print(
+            f"  {ep:6d}  {history['train_loss'][i]:10.4f}"
+            f"  {history['val_loss'][i]:10.4f}"
+            f"  {history['train_acc'][i]:9.1f}%"
+            f"  {history['val_acc'][i]:9.1f}%"
+        )
     print(f"{sep}\n")
 
-    np.save(
-        os.path.join(args.checkpoint_dir, "history.npy"),
-        history,
-    )
-    print(f"  History saved → {args.checkpoint_dir}/history.npy")
+    np.save(os.path.join(args.checkpoint_dir, "history.npy"), history)
+    print(f"  History saved -> {args.checkpoint_dir}/history.npy")
 
 
 if __name__ == "__main__":
