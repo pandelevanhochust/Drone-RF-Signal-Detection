@@ -91,16 +91,38 @@ def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
     print(f"  UNet base filters : {unet_base_filters}")
 
     model = DronePipeline(
-        num_classes       = num_classes,
-        in_channels       = 3,
-        unet_base_filters = unet_base_filters,
-        roi_output_size   = (224, 224),
-        mask_threshold    = train_args.get("mask_threshold", 0.7),
-        roi_strategy      = train_args.get("roi_strategy", "multiply"),
+        num_classes=num_classes,
+        in_channels=3,
+        unet_base_filters=unet_base_filters,
+        roi_output_size=(224, 224),
+        mask_threshold=train_args.get("mask_threshold", 0.7),
+        roi_strategy=train_args.get("roi_strategy", "multiply"),
     ).to(device)
 
-    model.load_state_dict(ckpt["model_state"])
+    # ── KEY TRANSFORMATION LOGIC ─────────────────────────────────────────────
+    state_dict = ckpt["model_state"]
+    new_state_dict = {}
+
+    for key, value in state_dict.items():
+        new_key = key
+
+        # 1. Translate the Torchvision Sequential weights to your explicit SE names
+        if ".se.1." in new_key:
+            new_key = new_key.replace(".se.1.", ".fc1.")
+        elif ".se.3." in new_key:
+            new_key = new_key.replace(".se.3.", ".fc2.")
+
+        # 2. Fix the classification head indexing (from .3. back to your .1.)
+        if "classifier.classifier.3." in new_key:
+            new_key = new_key.replace("classifier.classifier.3.", "classifier.classifier.1.")
+
+        new_state_dict[new_key] = value
+
+    # Load the mapped dictionary cleanly
+    model.load_state_dict(new_state_dict, strict=True)
     model.eval()
+
+    return model, meta, train_args
 
     return model, meta, train_args
 
