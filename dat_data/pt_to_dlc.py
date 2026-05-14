@@ -295,7 +295,7 @@ def get_args():
         description="Export DronePipeline checkpoint to ONNX."
     )
     p.add_argument(
-        "--../checkpoints/best_model.pth", required=True,
+        "--checkpoints", required=True, default="checkpoints/best_model.pth",
         help="Path to best_model.pth saved by main.py.",
     )
     p.add_argument(
