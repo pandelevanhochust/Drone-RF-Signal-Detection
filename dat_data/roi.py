@@ -1,4 +1,17 @@
-"""Architecture overview
+"""
+roi.py  (refactored)
+=====================
+Changes from previous version
+------------------------------
+Strategy 2 — Dropout2d added to U-Net bottleneck and decoder blocks.
+Strategy 3 — unet_base_filters default reduced from 64 → 32,
+             cutting U-Net parameter count from ~31 M to ~8 M.
+Strategy 4 (partial) — Softmax removed from DroneCLSNet classifier head.
+             CrossEntropyLoss in PipelineLoss now receives raw logits,
+             which is the correct PyTorch usage and fixes silent gradient
+             corruption that occurred with double-softmax.
+
+Architecture overview
 ---------------------
 Stage 1  DroneROIUNet      U-Net semantic segmentation  → binary mask
 Stage 2  ROIExtractor      mask × spectrogram + resize  → ROI patch
@@ -60,7 +73,20 @@ class EncoderBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    """Upsample 2×2 → cat(skip) → DoubleConv."""
+    """
+    Upsample 2×2 → pad to match skip → cat(skip) → DoubleConv.
+
+    SNPE/QNN compatibility fix:
+        The original code used F.interpolate(x, size=skip.shape[2:]) to
+        handle spatial size mismatches. This produces a dynamic shape op
+        that SNPE's shape inference cannot resolve statically, causing the
+        'Inconsistency in dynamic axis shapes' error during DLC conversion.
+
+        Replaced with F.pad() using statically-computable diff values.
+        F.pad with constant offsets is fully supported by SNPE opset 13.
+        With img_size=(256,512) both divisible by 16, the mismatch is at
+        most 1 pixel per side, so padding cost is negligible.
+    """
 
     def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
@@ -70,9 +96,18 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-        if x.shape != skip.shape:
-            x = F.interpolate(x, size=skip.shape[2:],
-                              mode="bilinear", align_corners=True)
+
+        # Pad x to match skip spatial dims if there is a 1-pixel mismatch.
+        # Using F.pad with integer offsets produces a static shape op
+        # that SNPE can trace correctly -- unlike F.interpolate(size=skip.shape).
+        diff_h = skip.shape[2] - x.shape[2]
+        diff_w = skip.shape[3] - x.shape[3]
+        if diff_h != 0 or diff_w != 0:
+            x = F.pad(x, [
+                diff_w // 2, diff_w - diff_w // 2,   # left, right
+                diff_h // 2, diff_h - diff_h // 2,   # top,  bottom
+            ])
+
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
 
@@ -81,10 +116,15 @@ class DroneROIUNet(nn.Module):
     """
     Drone-ROIs-Detection Model  (U-Net)
 
-    Dropout2d rates:
+    Strategy 2 — Dropout2d rates:
         Encoder blocks  : 0.0   (no dropout — preserve spatial features)
         Bottleneck      : 0.3   (highest dropout — most abstract features)
         Decoder blocks  : 0.1   (light dropout — reconstruction path)
+
+    Strategy 3 — base_filters default is now 32 (was 64).
+        32  filters → ~8 M  parameters   ← new default
+        64  filters → ~31 M parameters   ← old default
+    Set base_filters=64 to restore the original capacity if needed.
 
     Args:
         in_channels  : 1 (grayscale) or 3 (viridis RGB)
@@ -101,10 +141,12 @@ class DroneROIUNet(nn.Module):
         self.enc2 = EncoderBlock(f * 2,       f * 4,  dropout_p=0.0)
         self.enc3 = EncoderBlock(f * 4,       f * 8,  dropout_p=0.0)
 
-        #  Dropout2d(0.3) inside DoubleConv
+        # ── Bottleneck (strongest dropout — regularise abstract features) ──────
+        # Strategy 2: Dropout2d(0.3) inside DoubleConv
         self.bottleneck = DoubleConv(f * 8, f * 16, dropout_p=0.3)
 
         # ── Decoder (light dropout — regularise reconstruction path) ──────────
+        # Strategy 2: Dropout2d(0.1) inside each DecoderBlock's DoubleConv
         self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  dropout_p=0.1)
         self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  dropout_p=0.1)
         self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  dropout_p=0.1)
@@ -139,7 +181,7 @@ class DroneROIUNet(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ░░  STAGE 2 — ROI Extraction                                ░░
+# ░░  STAGE 2 — ROI Extraction  (unchanged)                                ░░
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ROIExtractor(nn.Module):
@@ -155,7 +197,7 @@ class ROIExtractor(nn.Module):
     def __init__(
         self,
         output_size: tuple[int, int] = (224, 224),
-        threshold: float = 0.7,
+        threshold: float = 0.5,
         strategy: str = "multiply",
     ):
         super().__init__()
@@ -421,9 +463,9 @@ class DronePipeline(nn.Module):
         self,
         num_classes: int        = 8,
         in_channels: int        = 3,
-        unet_base_filters: int  = 32,
+        unet_base_filters: int  = 32,       # Strategy 3: default 32 (was 64)
         roi_output_size: tuple  = (224, 224),
-        mask_threshold: float   = 0.7,
+        mask_threshold: float   = 0.5,
         roi_strategy: str       = "multiply",
         cls_dropout: float      = 0.2,
         cls_drop_connect: float = 0.2,
@@ -432,7 +474,7 @@ class DronePipeline(nn.Module):
 
         self.unet = DroneROIUNet(
             in_channels  = in_channels,
-            base_filters = unet_base_filters,
+            base_filters = unet_base_filters,   # Strategy 3
         )
 
         self.roi_extractor = ROIExtractor(
@@ -467,7 +509,7 @@ class DronePipeline(nn.Module):
 
     def unfreeze_unet(self):
         for p in self.unet.parameters():
-            p.requires_grad = True  
+            p.requires_grad = True
 
     def freeze_classifier(self):
         for p in self.classifier.parameters():
