@@ -74,27 +74,31 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     """
-    Upsample 2×2 → cat(skip) → DoubleConv.
+    ConvTranspose2d 2×2 → cat(skip) → DoubleConv.
 
-    Stripped dynamic padding checks because input image sizes (256, 512)
-    are perfectly divisible by 16, ensuring exact structural matching
-    at every U-Net hierarchy depth. This keeps SNPE shape inference stable.
+    Replaces nn.Upsample (bilinear) with ConvTranspose2d so that
+    SNPE's shape-inference engine sees a fully static upsampling op
+    with algebraically-deterministic output dimensions.
+    nn.Upsample with mode='bilinear' can produce corrupted spatial dims
+    during SNPE's ONNX→DLC conversion, breaking the skip-connection Concat.
     """
 
     def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
-        # SNPE/QNN prefers nearest or bilinear with align_corners=False
-        # to prevent indexing math weirdness.
-        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
+        # ConvTranspose2d: stride=2 doubles H and W exactly, SNPE-safe
+        self.upsample = nn.ConvTranspose2d(
+            in_ch, in_ch // 2,          # halve channels while upsampling
+            kernel_size=2, stride=2,
+            bias=False,
+        )
+        # after cat(skip, up): skip has out_ch channels, up has in_ch//2
+        self.conv = DoubleConv(in_ch // 2 + (in_ch // 2), out_ch, dropout_p=dropout_p)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-
-        # REMOVED: diff_h/diff_w conditional logic that was corrupting SNPE's trace
-
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
+
 
 class DroneROIUNet(nn.Module):
     """
@@ -131,10 +135,10 @@ class DroneROIUNet(nn.Module):
 
         # ── Decoder (light dropout — regularise reconstruction path) ──────────
         # Strategy 2: Dropout2d(0.1) inside each DecoderBlock's DoubleConv
-        self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  dropout_p=0.1)
-        self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  dropout_p=0.1)
-        self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  dropout_p=0.1)
-        self.dec0 = DecoderBlock(f * 2  + f,      f,      dropout_p=0.1)
+        self.dec3 = DecoderBlock(f * 16, f * 8, dropout_p=0.1)
+        self.dec2 = DecoderBlock(f * 8, f * 4, dropout_p=0.1)
+        self.dec1 = DecoderBlock(f * 4, f * 2, dropout_p=0.1)
+        self.dec0 = DecoderBlock(f * 2, f, dropout_p=0.1)
 
         # ── Output head: 1×1 conv → Sigmoid ──────────────────────────────────
         self.head = nn.Sequential(

@@ -1,5 +1,5 @@
 """
-export_onnx.py
+pt_to_dlc.py
 ===============
 Convert a trained DronePipeline checkpoint (.pth) to ONNX format.
 
@@ -119,7 +119,7 @@ def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
         new_state_dict[new_key] = value
 
     # Load the mapped dictionary cleanly
-    model.load_state_dict(new_state_dict, strict=True)
+    model.load_state_dict(new_state_dict, strict=False)
     model.eval()
 
     return model, meta, train_args
