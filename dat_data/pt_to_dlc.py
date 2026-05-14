@@ -211,7 +211,7 @@ def export_onnx(
             do_constant_folding = True,
             input_names      = ["input"],
             output_names     = output_names,
-            dynamic_axes     = dynamic_axes,
+            # dynamic_axes     = dynamic_axes,
         )
 
     print(f"  [OK] Exported -> {onnx_path}")
