@@ -119,7 +119,10 @@ def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
         new_state_dict[new_key] = value
 
     # Load the mapped dictionary cleanly
-    model.load_state_dict(new_state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    print(f"  Missing keys  : {missing}")  # should only be unet.decN.upsample.weight
+    print(f"  Unexpected    : {unexpected}")  # should be empty
+
     model.eval()
 
     return model, meta, train_args
