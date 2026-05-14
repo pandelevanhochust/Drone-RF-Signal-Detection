@@ -34,7 +34,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from dat_data.roi import DronePipeline
+from roi import DronePipeline
 
 # =============================================================================
 # Wrapper: pipeline that returns only logits (ONNX-friendly single output)
