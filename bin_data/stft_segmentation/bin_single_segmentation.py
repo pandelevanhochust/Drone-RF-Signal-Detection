@@ -1,24 +1,23 @@
 """
-Segments a single .bin (SC16) IQ file into overlapping STFT spectrograms
-using a sliding window with configurable overlap.
+Sliding-window STFT spectrogram export from a single .bin (SC16) IQ file.
 
 Examples:
     # 1/8 overlap (default, 70 ms step for 80 ms window)
-    python segment_bin_sliding.py --file recording.bin
+    python bin_single_segmentation.py --file recording.bin
 
     # No overlap / consecutive
-    python segment_bin_sliding.py --file recording.bin --overlap 0
+    python bin_single_segmentation.py --file recording.bin --overlap 0
 
     # Manual step
-    python segment_bin_sliding.py --file recording.bin --step_ms 40
+    python bin_single_segmentation.py --file recording.bin --step_ms 40
 """
 
 import argparse
 import os
 import sys
+
 import numpy as np
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.signal import stft, windows
@@ -38,11 +37,7 @@ def compute_spectrogram(file_path: str,
                         start_ms: float,
                         duration_ms: float = 80.0,
                         nfft: int = 1024) -> np.ndarray:
-    """
-    Read one window from the SC16 .bin file.
-    Applies int16 → float32 normalization and DC offset removal.
-    Returns spec_db as a numpy array.
-    """
+    """Read one window from the SC16 .bin file. Returns spec_db."""
     samples_to_skip = int(sample_rate * (start_ms   / 1000.0))
     samples_to_read = int(sample_rate * (duration_ms / 1000.0))
 
@@ -95,7 +90,6 @@ def segment_file_sliding(file_path: str,
         print(f"File too short ({total_ms:.1f} ms) for a {duration_ms} ms window — aborted.")
         sys.exit(1)
 
-    # All valid start positions where the full window fits
     starts_ms = np.arange(0.0, total_ms - duration_ms + step_ms, step_ms)
     starts_ms = starts_ms[starts_ms + duration_ms <= total_ms]
 
@@ -119,7 +113,6 @@ def segment_file_sliding(file_path: str,
         out_path = os.path.join(out_dir, out_name)
         save_spectrogram(spec_db, out_path)
 
-        # Progress every 10 segments (bin files are shorter than .dat)
         if (idx + 1) % 10 == 0 or (idx + 1) == len(starts_ms):
             print(f"  [{idx+1}/{len(starts_ms)}]  {out_name}")
 
@@ -133,18 +126,15 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Sliding-window STFT spectrogram export from a single .bin (SC16) file."
     )
-    p.add_argument("--file",        required=True,            help="Input .bin file")
-    p.add_argument("--out",         default="output_images",  help="Output directory")
+    p.add_argument("--file",        required=True,           help="Input .bin file")
+    p.add_argument("--out",         default="output_images", help="Output directory")
     p.add_argument("--fs",          type=float, default=60e6, help="Sample rate (Hz)")
     p.add_argument("--nfft",        type=int,   default=1024, help="FFT size")
     p.add_argument("--duration_ms", type=float, default=80.0, help="Window length (ms)")
 
-    # Mutually exclusive: fraction-based overlap OR explicit step
     group = p.add_mutually_exclusive_group()
     group.add_argument("--overlap", type=float, default=None,
-                       help="Overlap as a fraction 0–<1  "
-                            "(e.g. 0.125 = 1/8, 0 = consecutive). "
-                            "step = duration × (1 − overlap).")
+                       help="Overlap as a fraction 0–<1 (e.g. 0.125 = 1/8, 0 = no overlap).")
     group.add_argument("--step_ms", type=float, default=None,
                        help="Slide step in ms (overrides --overlap).")
 
@@ -154,7 +144,6 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # Resolve step_ms
     if args.step_ms is not None:
         step_ms = args.step_ms
     elif args.overlap is not None:

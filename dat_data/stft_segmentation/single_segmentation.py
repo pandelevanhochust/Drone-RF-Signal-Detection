@@ -1,6 +1,4 @@
 """
-segment_single_file.py
-----------------------
 Segments a single .dat IQ file into 2–3 random 80 ms STFT spectrograms
 and saves each as a PNG image.
 
@@ -143,7 +141,7 @@ def parse_args():
     p.add_argument("--fs",          type=float, default=60e6,      help="Sample rate (Hz)")
     p.add_argument("--center_freq", type=float, default=2.4375e9,  help="Centre frequency (Hz)")
     p.add_argument("--nfft",        type=int,   default=1024,      help="FFT size")
-    p.add_argument("--duration_ms", type=float, default=80.0,      help="Segment length (ms)")
+    p.add_argument("--duration_ms", type=float, default=5.0,      help="Segment length (ms)")
     p.add_argument("--n_segments",  type=int,   default=None,      help="Fixed # of segments (default: random 2–3)")
     p.add_argument("--seed",        type=int,   default=None,      help="Random seed for reproducibility")
     return p.parse_args()

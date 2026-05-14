@@ -1,18 +1,15 @@
 """
-segment_dataset.py
-------------------
 Sliding-window STFT spectrogram export from DroneDetect_V2 .dat files.
-Overlap is controlled via --overlap (fraction) or --step_ms directly.
 
 Examples:
-    # 1/8 overlap  (~70 ms step)
-    python segment_dataset.py --root ~/DroneDetect_V2 --overlap 0.125
+    # 1/8 overlap (default, 70 ms step for 80 ms window)
+    python stft_segmentation.py --root ~/DroneDetect_V2 --out output_spectrograms/
 
     # No overlap / consecutive
-    python segment_dataset.py --root ~/DroneDetect_V2 --overlap 0
+    python stft_segmentation.py --root ~/DroneDetect_V2 --overlap 0
 
     # Manual step
-    python segment_dataset.py --root ~/DroneDetect_V2 --step_ms 70
+    python stft_segmentation.py --root ~/DroneDetect_V2 --step_ms 40
 """
 
 import argparse
@@ -22,19 +19,18 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import cupy as cp
-import cusignal
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.signal import stft, windows
 
 
 # ── Core DSP ──────────────────────────────────────────────────────────────────
 
 def file_duration_ms(file_path: str, sample_rate: float) -> float:
-    n_floats  = os.path.getsize(file_path) // 4
-    n_samples = n_floats // 2
+    n_floats  = os.path.getsize(file_path) // 4   # float32 = 4 bytes
+    n_samples = n_floats // 2                      # I+Q pairs
     return (n_samples / sample_rate) * 1000.0
 
 
@@ -43,25 +39,24 @@ def compute_spectrogram(file_path: str,
                         start_ms: float,
                         duration_ms: float = 80.0,
                         nfft: int = 1024) -> np.ndarray:
-    """Returns spec_db as a numpy array (computed on GPU via cupy/cusignal)."""
+    """Read one window from a float32 IQ .dat file. Returns spec_db."""
     skip_samples = int(sample_rate * (start_ms   / 1000.0))
     num_samples  = int(sample_rate * (duration_ms / 1000.0))
 
     data_map  = np.memmap(file_path, dtype=np.float32, mode='r')
     raw_chunk = data_map[2 * skip_samples: 2 * skip_samples + 2 * num_samples]
 
-    raw_gpu = cp.array(raw_chunk)
-    iq_gpu  = raw_gpu[0::2] + 1j * raw_gpu[1::2]
+    iq = raw_chunk[0::2] + 1j * raw_chunk[1::2]
 
-    _, _, Zxx = cusignal.stft(iq_gpu, sample_rate,
-                               return_onesided=False,
-                               window='hamming',
-                               nperseg=nfft)
+    _, _, Zxx = stft(iq, sample_rate,
+                     return_onesided=False,
+                     window=windows.hamming(nfft),
+                     nperseg=nfft)
 
-    Zxx     = cp.fft.fftshift(Zxx, axes=0)
-    spec_db = 10 * cp.log10(cp.abs(Zxx) ** 2 + 1e-10)
+    Zxx     = np.fft.fftshift(Zxx, axes=0)
+    spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
 
-    return spec_db.get()   # → numpy, back to CPU
+    return spec_db
 
 
 def save_spectrogram(spec_db: np.ndarray, out_path: str) -> None:
@@ -143,12 +138,12 @@ def collect_tasks(root_dir: str, out_root: str,
 
 
 def run_dataset(root_dir: str,
-                out_root: str       = "output_spectrograms",
-                sample_rate: float  = 60e6,
-                duration_ms: float  = 80.0,
-                step_ms: float      = 70.0,
-                nfft: int           = 1024,
-                workers: int        = 1) -> None:
+                out_root: str      = "output_spectrograms",
+                sample_rate: float = 60e6,
+                duration_ms: float = 80.0,
+                step_ms: float     = 70.0,
+                nfft: int          = 1024,
+                workers: int       = 1) -> None:
 
     tasks = collect_tasks(root_dir, out_root, sample_rate,
                           duration_ms, step_ms, nfft)
@@ -164,7 +159,7 @@ def run_dataset(root_dir: str,
     print(f"Output root   : {out_root}")
     print(f"Workers       : {workers}")
     print(f"Window        : {duration_ms} ms")
-    print(f"Step          : {step_ms} ms  ({overlap_frac:.3f} overlap = {overlap_frac:.0%})")
+    print(f"Step          : {step_ms} ms  ({overlap_frac:.1%} overlap)")
     print(f"Est. segs/file: ~{est_segs}  (for a 2 s file)")
     print("─" * 60)
 
@@ -209,18 +204,16 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Sliding-window STFT spectrogram export from DroneDetect_V2 .dat files."
     )
-    p.add_argument("--root",        required=True,       help="Dataset root directory")
-    p.add_argument("--out",         default="output_spectrograms", help="Output root directory")
-    p.add_argument("--fs",          type=float, default=60e6,   help="Sample rate (Hz)")
-    p.add_argument("--nfft",        type=int,   default=1024,   help="FFT size")
-    p.add_argument("--duration_ms", type=float, default=80.0,   help="Window length (ms)")
-    p.add_argument("--workers",     type=int,   default=1,      help="Parallel worker processes")
+    p.add_argument("--root",        required=True,                  help="Dataset root directory")
+    p.add_argument("--out",         default="output_spectrograms",  help="Output root directory")
+    p.add_argument("--fs",          type=float, default=60e6,       help="Sample rate (Hz)")
+    p.add_argument("--nfft",        type=int,   default=1024,       help="FFT size")
+    p.add_argument("--duration_ms", type=float, default=80.0,       help="Window length (ms)")
+    p.add_argument("--workers",     type=int,   default=1,          help="Parallel worker processes")
 
-    # Mutually exclusive: specify overlap fraction OR step directly
     group = p.add_mutually_exclusive_group()
     group.add_argument("--overlap", type=float, default=None,
-                       help="Overlap as a fraction 0–<1 (e.g. 0.125 = 1/8, 0 = no overlap). "
-                            "Computes step_ms = duration_ms * (1 - overlap).")
+                       help="Overlap as a fraction 0–<1 (e.g. 0.125 = 1/8, 0 = no overlap).")
     group.add_argument("--step_ms", type=float, default=None,
                        help="Slide step in ms (overrides --overlap).")
 
@@ -230,17 +223,15 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # Resolve step_ms from whichever argument was given
     if args.step_ms is not None:
         step_ms = args.step_ms
     elif args.overlap is not None:
         if not (0.0 <= args.overlap < 1.0):
-            print("ERROR: --overlap must be in range [0, 1).")
+            print("ERROR: --overlap must be in [0, 1).")
             sys.exit(1)
         step_ms = args.duration_ms * (1.0 - args.overlap)
     else:
-        # Default: 1/8 overlap
-        step_ms = args.duration_ms * (1.0 - 0.125)   # = 70 ms
+        step_ms = args.duration_ms * (1.0 - 0.125)  # default: 1/8 overlap → 70 ms
 
     run_dataset(
         root_dir    = args.root,
