@@ -118,7 +118,7 @@ def collect_tasks(root_dir: str, out_root: str,
     root  = Path(root_dir).expanduser().resolve()
     tasks = []
 
-    SKIP_FOLDERS = {"BLUE", "WIFI", "CLEAN"}
+    SKIP_FOLDERS = {}
 
     for dat_file in sorted(root.rglob("*.dat")):
         rel_parts = dat_file.relative_to(root).parts
