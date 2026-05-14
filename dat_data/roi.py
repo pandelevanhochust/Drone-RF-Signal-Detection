@@ -72,28 +72,28 @@ class EncoderBlock(nn.Module):
         return skip, down
 
 
-class DecoderBlock(nn.Module):
+class EncoderBlock(nn.Module):
     """
-    ConvTranspose2d (up_ch → up_ch) → cat(skip) → DoubleConv(up_ch+skip_ch → out_ch)
+    DoubleConv → skip  +  Conv2d(stride=2) for downsampling.
 
-    up_ch  : channels of the tensor coming from the previous stage (bottleneck/decoder)
-    in_ch  : up_ch + skip_ch  — total channels after concat (fed into DoubleConv)
-    out_ch : output channels of this decoder stage
+    Replaces MaxPool2d with a learnable strided Conv2d so SNPE's shape
+    inference sees a standard convolution with an exact closed-form output:
+        H_out = floor((H_in + 2*pad - kernel) / stride) + 1
+                = floor((H + 2*1 - 3) / 2) + 1  = floor(H/2)  for H divisible by 2
+    MaxPool2d triggers the 'calcOutputDim: beyond border, decrementing' warning
+    in this SNPE version, which corrupts spatial dims flowing into skip connections.
     """
 
-    def __init__(self, up_ch: int, in_ch: int, out_ch: int, dropout_p: float = 0.0):
+    def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
-        self.upsample = nn.ConvTranspose2d(
-            up_ch, up_ch,
-            kernel_size=2, stride=2,
-            bias=False,
-        )
         self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
+        # stride=2 conv replaces MaxPool2d — SNPE-safe, same spatial halving
+        self.down = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False)
 
-    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
-        x = self.upsample(x)
-        x = torch.cat([skip, x], dim=1)
-        return self.conv(x)
+    def forward(self, x: torch.Tensor):
+        skip = self.conv(x)
+        down = self.down(skip)
+        return skip, down
 
 class DroneROIUNet(nn.Module):
     """
