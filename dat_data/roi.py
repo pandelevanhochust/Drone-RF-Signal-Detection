@@ -262,21 +262,20 @@ def _round_repeats(n: int, d: float) -> int:
 
 
 class SqueezeExcitation(nn.Module):
-    def __init__(self, in_ch: int, se_ratio: float = 0.25):
-        super().__init__()
-        sq = max(1, int(in_ch * se_ratio))
-        # No AdaptiveAvgPool2d -- use ReduceMean via x.mean() in forward
-        self.fc1 = nn.Conv2d(in_ch, sq, 1, bias=True)
-        self.act  = nn.SiLU(inplace=True)
-        self.fc2  = nn.Conv2d(sq, in_ch, 1, bias=True)
-        self.gate = nn.Sigmoid()
+    class SqueezeExcitation(nn.Module):
+        def __init__(self, in_ch: int, se_ratio: float = 0.25):
+            super().__init__()
+            sq = max(1, int(in_ch * se_ratio))
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(in_ch, sq, 1, bias=True),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(sq, in_ch, 1, bias=True),
+                nn.Sigmoid(),
+            )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # mean over H,W dims -- exports as ReduceMean, SNPE compatible
-        s = x.mean(dim=[2, 3], keepdim=True)   # (B, C, 1, 1)
-        s = self.act(self.fc1(s))
-        s = self.gate(self.fc2(s))
-        return x * s
+        def forward(self, x):
+            return x * self.se(x)
 
 
 class MBConvBlock(nn.Module):
