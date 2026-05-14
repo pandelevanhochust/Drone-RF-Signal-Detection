@@ -34,7 +34,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from ..roi import DronePipeline
+from dat_data.roi import DronePipeline
 
 # =============================================================================
 # Wrapper: pipeline that returns only logits (ONNX-friendly single output)
@@ -299,7 +299,7 @@ def get_args():
         help="Path to best_model.pth saved by main.py.",
     )
     p.add_argument(
-        "--out_dir", default="helper",
+        "--out_dir", default="checkpoints",
         help="Output directory for .onnx files",
     )
     p.add_argument(
