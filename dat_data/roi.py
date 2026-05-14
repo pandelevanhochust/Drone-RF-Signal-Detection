@@ -74,43 +74,27 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     """
-    Upsample 2×2 → pad to match skip → cat(skip) → DoubleConv.
+    Upsample 2×2 → cat(skip) → DoubleConv.
 
-    SNPE/QNN compatibility fix:
-        The original code used F.interpolate(x, size=skip.shape[2:]) to
-        handle spatial size mismatches. This produces a dynamic shape op
-        that SNPE's shape inference cannot resolve statically, causing the
-        'Inconsistency in dynamic axis shapes' error during DLC conversion.
-
-        Replaced with F.pad() using statically-computable diff values.
-        F.pad with constant offsets is fully supported by SNPE opset 13.
-        With img_size=(256,512) both divisible by 16, the mismatch is at
-        most 1 pixel per side, so padding cost is negligible.
+    Stripped dynamic padding checks because input image sizes (256, 512)
+    are perfectly divisible by 16, ensuring exact structural matching
+    at every U-Net hierarchy depth. This keeps SNPE shape inference stable.
     """
 
     def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
-        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear",
-                                    align_corners=True)
+        # SNPE/QNN prefers nearest or bilinear with align_corners=False
+        # to prevent indexing math weirdness.
+        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
         self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
 
-        # Pad x to match skip spatial dims if there is a 1-pixel mismatch.
-        # Using F.pad with integer offsets produces a static shape op
-        # that SNPE can trace correctly -- unlike F.interpolate(size=skip.shape).
-        diff_h = skip.shape[2] - x.shape[2]
-        diff_w = skip.shape[3] - x.shape[3]
-        if diff_h != 0 or diff_w != 0:
-            x = F.pad(x, [
-                diff_w // 2, diff_w - diff_w // 2,   # left, right
-                diff_h // 2, diff_h - diff_h // 2,   # top,  bottom
-            ])
+        # REMOVED: diff_h/diff_w conditional logic that was corrupting SNPE's trace
 
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
-
 
 class DroneROIUNet(nn.Module):
     """
