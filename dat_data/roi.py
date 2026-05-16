@@ -105,8 +105,13 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-        # Crop to known static target size -- no runtime shape ops
-        x = x[:, :, :self.skip_h, :self.skip_w]
+        # Crop to known static size using torch.narrow() which exports as
+        # a Slice op with explicit start=0 and length=skip_h/skip_w.
+        # SNPE requires positive stride and explicit length -- negative-index
+        # slicing (x[:,:,:H,:W]) can produce stride=4 begin=49 end=0 which
+        # SNPE rejects. torch.narrow(dim, start, length) avoids this.
+        x = x.narrow(2, 0, self.skip_h)   # crop height dim
+        x = x.narrow(3, 0, self.skip_w)   # crop width dim
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
 
