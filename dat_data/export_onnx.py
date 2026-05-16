@@ -44,10 +44,8 @@ from roi import DronePipeline
 class DronePipelineONNX(nn.Module):
     """
     Thin wrapper around DronePipeline that returns ONLY logits.
-
     ONNX export works best with a single tensor output.
-    For inspection, mask export is available via --export_mask flag
-    which switches to a two-output version.
+    For inspection, mask export is available via --export_mask flag.
     """
 
     def __init__(self, pipeline: DronePipeline, export_mask: bool = False):
@@ -65,12 +63,56 @@ class DronePipelineONNX(nn.Module):
 
 
 # =============================================================================
+# Checkpoint key remapping
+# =============================================================================
+
+def remap_state_dict(raw_state: dict) -> dict:
+    """
+    Remap checkpoint keys from the old layer structure to the new SNPE-compatible
+    structure after SqueezeExcitation and DroneCLSNet.classifier were refactored.
+
+    Changes:
+    --------
+    SqueezeExcitation refactor:
+        OLD: self.se = nn.Sequential(AdaptiveAvgPool2d, Conv2d, SiLU, Conv2d, Sigmoid)
+             keys: ...se.1.weight / se.1.bias / se.3.weight / se.3.bias
+        NEW: self.fc1, self.fc2  (separate Conv2d members, GAP via .mean() in forward)
+             keys: ...fc1.weight / fc1.bias / fc2.weight / fc2.bias
+
+    DroneCLSNet.classifier refactor:
+        OLD: nn.Sequential(AdaptiveAvgPool2d[0], Flatten[1], Dropout[2], Linear[3])
+             keys: classifier.classifier.3.weight / .bias
+        NEW: nn.Sequential(Dropout[0], Linear[1])  -- GAP via .mean() in forward
+             keys: classifier.classifier.1.weight / .bias
+    """
+    remapped = {}
+    for k, v in raw_state.items():
+        new_k = k
+        # SqueezeExcitation: se.1 -> fc1,  se.3 -> fc2
+        new_k = new_k.replace(".se.1.weight", ".fc1.weight")
+        new_k = new_k.replace(".se.1.bias",   ".fc1.bias")
+        new_k = new_k.replace(".se.3.weight", ".fc2.weight")
+        new_k = new_k.replace(".se.3.bias",   ".fc2.bias")
+        # Classifier Linear: index 3 -> index 1
+        new_k = new_k.replace(
+            "classifier.classifier.3.weight",
+            "classifier.classifier.1.weight",
+        )
+        new_k = new_k.replace(
+            "classifier.classifier.3.bias",
+            "classifier.classifier.1.bias",
+        )
+        remapped[new_k] = v
+    return remapped
+
+
+# =============================================================================
 # Loader
 # =============================================================================
 
 def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
     """
-    Load DronePipeline from checkpoint.
+    Load DronePipeline from checkpoint with automatic key remapping.
 
     Returns:
         model      : DronePipeline in eval mode
@@ -101,9 +143,20 @@ def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
         roi_strategy      = train_args.get("roi_strategy", "multiply"),
     ).to(device)
 
-    model.load_state_dict(ckpt["model_state"])
-    model.eval()
+    # remap old key names to new SNPE-compatible structure
+    remapped = remap_state_dict(ckpt["model_state"])
+    result   = model.load_state_dict(remapped, strict=False)
 
+    if result.missing_keys:
+        print(f"  [WARN] Missing keys  ({len(result.missing_keys)}): "
+              f"{result.missing_keys[:3]} ...")
+    if result.unexpected_keys:
+        print(f"  [WARN] Unexpected keys ({len(result.unexpected_keys)}): "
+              f"{result.unexpected_keys[:3]} ...")
+    if not result.missing_keys and not result.unexpected_keys:
+        print("  [OK]  All checkpoint keys loaded successfully")
+
+    model.eval()
     return model, meta, train_args
 
 
@@ -118,7 +171,7 @@ def export_onnx(
     batch_size      : int   = 1,
     export_mask     : bool  = False,
     simplify        : bool  = False,
-    opset           : int   = 17,
+    opset           : int   = 13,
 ) -> str:
     """
     Export DronePipeline to ONNX.
@@ -130,7 +183,7 @@ def export_onnx(
         batch_size      : static batch size for export (use 1 for deployment)
         export_mask     : if True, export logits + mask as two outputs
         simplify        : run onnx-simplifier after export
-        opset           : ONNX opset version (default 17)
+        opset           : ONNX opset version (default 13 for SNPE compat)
 
     Returns:
         path to exported .onnx file
@@ -143,33 +196,24 @@ def export_onnx(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load model ────────────────────────────────────────────────────────────
+    # load model
     print(f"\n{'='*60}")
     print("  Loading model ...")
     print('='*60)
     pipeline, meta, train_args = load_pipeline(checkpoint_path, device)
 
-    # wrap in ONNX-friendly module
     export_model = DronePipelineONNX(pipeline, export_mask=export_mask)
     export_model.eval()
 
-    # ── Dummy input ───────────────────────────────────────────────────────────
-    dummy_input = torch.randn(batch_size, 3, H, W, device=device)
-
-    # ── Define output names ───────────────────────────────────────────────────
+    dummy_input  = torch.randn(batch_size, 3, H, W, device=device)
     output_names = ["logits"]
     if export_mask:
         output_names.append("mask")
 
-    # ── Define dynamic axes (optional -- makes batch size dynamic) ────────────
-    dynamic_axes = {
-        "input"  : {0: "batch_size"},
-        "logits" : {0: "batch_size"},
-    }
+    dynamic_axes = {"input": {0: "batch_size"}, "logits": {0: "batch_size"}}
     if export_mask:
         dynamic_axes["mask"] = {0: "batch_size"}
 
-    # ── Export ────────────────────────────────────────────────────────────────
     suffix    = "_with_mask" if export_mask else ""
     onnx_path = out_dir / f"drone_pipeline{suffix}.onnx"
 
@@ -186,17 +230,17 @@ def export_onnx(
             export_model,
             dummy_input,
             str(onnx_path),
-            export_params    = True,
-            opset_version    = opset,
+            export_params       = True,
+            opset_version       = opset,
             do_constant_folding = True,
-            input_names      = ["input"],
-            output_names     = output_names,
-            dynamic_axes     = dynamic_axes,
+            input_names         = ["input"],
+            output_names        = output_names,
+            dynamic_axes        = dynamic_axes,
         )
 
     print(f"  [OK] Exported -> {onnx_path}")
 
-    # ── Validate exported ONNX ────────────────────────────────────────────────
+    # validate
     print(f"\n{'='*60}")
     print("  Validating ONNX model ...")
     print('='*60)
@@ -204,7 +248,6 @@ def export_onnx(
     onnx.checker.check_model(onnx_model)
     print("  [OK] ONNX model is valid")
 
-    # print graph IO summary
     print(f"\n  Inputs:")
     for inp in onnx_model.graph.input:
         shape = [d.dim_value for d in inp.type.tensor_type.shape.dim]
@@ -217,7 +260,7 @@ def export_onnx(
     file_mb = onnx_path.stat().st_size / 1024 / 1024
     print(f"\n  File size : {file_mb:.1f} MB")
 
-    # ── Optional: onnxsim simplification ─────────────────────────────────────
+    # simplify
     sim_path = None
     if simplify:
         print(f"\n{'='*60}")
@@ -234,10 +277,9 @@ def export_onnx(
             else:
                 print("  [WARN] Simplification check failed -- using original")
         except ImportError:
-            print("  [SKIP] onnxsim not installed.")
-            print("         Install with: pip install onnxsim")
+            print("  [SKIP] onnxsim not installed: pip install onnxsim")
 
-    # ── Optional: onnxruntime verification ────────────────────────────────────
+    # verify with onnxruntime
     print(f"\n{'='*60}")
     print("  Running OnnxRuntime inference check ...")
     print('='*60)
@@ -245,43 +287,42 @@ def export_onnx(
         import onnxruntime as ort
         import numpy as np
 
-        target = str(sim_path) if sim_path else str(onnx_path)
-        sess   = ort.InferenceSession(target, providers=["CPUExecutionProvider"])
+        target   = str(sim_path) if sim_path else str(onnx_path)
+        sess     = ort.InferenceSession(target, providers=["CPUExecutionProvider"])
         dummy_np = dummy_input.numpy()
-
-        ort_out = sess.run(None, {"input": dummy_np})
+        ort_out  = sess.run(None, {"input": dummy_np})
 
         print(f"  [OK] OnnxRuntime forward pass succeeded")
         print(f"  logits shape : {ort_out[0].shape}")
         if export_mask:
             print(f"  mask shape   : {ort_out[1].shape}")
 
-        # compare with PyTorch output
         with torch.no_grad():
             pt_out = export_model(dummy_input)
-        if export_mask:
-            pt_logits = pt_out[0].numpy()
-        else:
-            pt_logits = pt_out.numpy()
-
-        max_diff = float(np.abs(ort_out[0] - pt_logits).max())
-        print(f"  Max logit diff (PT vs ORT) : {max_diff:.6f}  "
-              + ("[OK]" if max_diff < 1e-4 else "[WARN] diff > 1e-4"))
+        pt_logits = pt_out[0].numpy() if export_mask else pt_out.numpy()
+        max_diff  = float(np.abs(ort_out[0] - pt_logits).max())
+        status    = "[OK]" if max_diff < 1e-4 else "[WARN] diff > 1e-4"
+        print(f"  Max logit diff (PT vs ORT) : {max_diff:.6f}  {status}")
 
     except ImportError:
-        print("  [SKIP] onnxruntime not installed.")
-        print("         Install with: pip install onnxruntime")
+        print("  [SKIP] onnxruntime not installed: pip install onnxruntime")
 
-    # ── Done ──────────────────────────────────────────────────────────────────
+    # summary
     print(f"\n{'='*60}")
     print("  Export complete")
     print('='*60)
-    print(f"  ONNX model : {onnx_path}")
+    print(f"  ONNX model  : {onnx_path}")
     if sim_path:
-        print(f"  Simplified : {sim_path}")
-    print(f"\n  Class names : {meta.get('class_names', [])}")
-    print(f"  Use logits.argmax(axis=1) to get predicted class index.")
-    print(f"  Apply softmax(logits) to get class probabilities.")
+        print(f"  Simplified  : {sim_path}")
+    print(f"  Class names : {meta.get('class_names', [])}")
+    print(f"\n  Next step -- convert to DLC:")
+    print(f"  snpe-onnx-to-dlc \\")
+    if sim_path:
+        print(f"      -i {sim_path} \\")
+    else:
+        print(f"      -i {onnx_path} \\")
+    print(f"      -o checkpoints/drone.dlc \\")
+    print(f"      --overwrite_input_shapes input:1,3,{H},{W}")
     print('='*60)
 
     return str(onnx_path)
@@ -318,11 +359,11 @@ def get_args():
     )
     p.add_argument(
         "--simplify", action="store_true",
-        help="Run onnx-simplifier after export (requires: pip install onnxsim).",
+        help="Run onnx-simplifier (pip install onnxsim).",
     )
     p.add_argument(
-        "--opset", type=int, default=17,
-        help="ONNX opset version. Default: 17",
+        "--opset", type=int, default=13,
+        help="ONNX opset version. Default: 13 (best SNPE compatibility).",
     )
     return p.parse_args()
 
