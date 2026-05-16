@@ -1,5 +1,5 @@
 """
-pt_to_dlc.py
+export_onnx.py
 ===============
 Convert a trained DronePipeline checkpoint (.pth) to ONNX format.
 
@@ -33,7 +33,9 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+
 from roi import DronePipeline
+
 
 # =============================================================================
 # Wrapper: pipeline that returns only logits (ONNX-friendly single output)
@@ -91,41 +93,16 @@ def load_pipeline(checkpoint_path: str, device: torch.device) -> tuple:
     print(f"  UNet base filters : {unet_base_filters}")
 
     model = DronePipeline(
-        num_classes=num_classes,
-        in_channels=3,
-        unet_base_filters=unet_base_filters,
-        roi_output_size=(224, 224),
-        mask_threshold=train_args.get("mask_threshold", 0.7),
-        roi_strategy=train_args.get("roi_strategy", "multiply"),
+        num_classes       = num_classes,
+        in_channels       = 3,
+        unet_base_filters = unet_base_filters,
+        roi_output_size   = (224, 224),
+        mask_threshold    = train_args.get("mask_threshold", 0.7),
+        roi_strategy      = train_args.get("roi_strategy", "multiply"),
     ).to(device)
 
-    # ── KEY TRANSFORMATION LOGIC ─────────────────────────────────────────────
-    state_dict = ckpt["model_state"]
-    new_state_dict = {}
-
-    for key, value in state_dict.items():
-        new_key = key
-
-        # 1. Translate the Torchvision Sequential weights to your explicit SE names
-        if ".se.1." in new_key:
-            new_key = new_key.replace(".se.1.", ".fc1.")
-        elif ".se.3." in new_key:
-            new_key = new_key.replace(".se.3.", ".fc2.")
-
-        # 2. Fix the classification head indexing (from .3. back to your .1.)
-        if "classifier.classifier.3." in new_key:
-            new_key = new_key.replace("classifier.classifier.3.", "classifier.classifier.1.")
-
-        new_state_dict[new_key] = value
-
-    # Load the mapped dictionary cleanly
-    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
-    print(f"  Missing keys  : {missing}")  # should only be unet.decN.upsample.weight
-    print(f"  Unexpected    : {unexpected}")  # should be empty
-
+    model.load_state_dict(ckpt["model_state"])
     model.eval()
-
-    return model, meta, train_args
 
     return model, meta, train_args
 
@@ -214,7 +191,7 @@ def export_onnx(
             do_constant_folding = True,
             input_names      = ["input"],
             output_names     = output_names,
-            # dynamic_axes     = dynamic_axes,
+            dynamic_axes     = dynamic_axes,
         )
 
     print(f"  [OK] Exported -> {onnx_path}")
@@ -319,12 +296,12 @@ def get_args():
         description="Export DronePipeline checkpoint to ONNX."
     )
     p.add_argument(
-        "--checkpoints", required=True,
+        "--checkpoint", required=True,
         help="Path to best_model.pth saved by main.py.",
     )
     p.add_argument(
-        "--out_dir", default="checkpoints",
-        help="Output directory for .onnx files",
+        "--out_dir", default="onnx_exports",
+        help="Output directory for .onnx files. Default: ./onnx_exports",
     )
     p.add_argument(
         "--img_size", nargs=2, type=int, default=[256, 512],
@@ -353,7 +330,7 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     export_onnx(
-        checkpoint_path = args.checkpoints,
+        checkpoint_path = args.checkpoint,
         out_dir         = args.out_dir,
         img_size        = tuple(args.img_size),
         batch_size      = args.batch_size,
