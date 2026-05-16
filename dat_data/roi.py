@@ -97,16 +97,15 @@ class DecoderBlock(nn.Module):
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
 
-        # Pad x to match skip spatial dims if there is a 1-pixel mismatch.
-        # Using F.pad with integer offsets produces a static shape op
-        # that SNPE can trace correctly -- unlike F.interpolate(size=skip.shape).
+        # Always pad -- zero padding is a no-op when diff=0 but keeps
+        # the op in the ONNX graph so SNPE shape inference stays static.
+        # Removes the Python boolean branch that caused TracerWarning.
         diff_h = skip.shape[2] - x.shape[2]
         diff_w = skip.shape[3] - x.shape[3]
-        if diff_h != 0 or diff_w != 0:
-            x = F.pad(x, [
-                diff_w // 2, diff_w - diff_w // 2,   # left, right
-                diff_h // 2, diff_h - diff_h // 2,   # top,  bottom
-            ])
+        x = F.pad(x, [
+            diff_w // 2, diff_w - diff_w // 2,
+            diff_h // 2, diff_h - diff_h // 2,
+        ])
 
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
