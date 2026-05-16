@@ -72,28 +72,45 @@ class EncoderBlock(nn.Module):
         return skip, down
 
 
-class EncoderBlock(nn.Module):
+class DecoderBlock(nn.Module):
     """
-    DoubleConv → skip  +  Conv2d(stride=2) for downsampling.
+    Upsample 2×2 → pad to match skip → cat(skip) → DoubleConv.
 
-    Replaces MaxPool2d with a learnable strided Conv2d so SNPE's shape
-    inference sees a standard convolution with an exact closed-form output:
-        H_out = floor((H_in + 2*pad - kernel) / stride) + 1
-                = floor((H + 2*1 - 3) / 2) + 1  = floor(H/2)  for H divisible by 2
-    MaxPool2d triggers the 'calcOutputDim: beyond border, decrementing' warning
-    in this SNPE version, which corrupts spatial dims flowing into skip connections.
+    SNPE/QNN compatibility fix:
+        The original code used F.interpolate(x, size=skip.shape[2:]) to
+        handle spatial size mismatches. This produces a dynamic shape op
+        that SNPE's shape inference cannot resolve statically, causing the
+        'Inconsistency in dynamic axis shapes' error during DLC conversion.
+
+        Replaced with F.pad() using statically-computable diff values.
+        F.pad with constant offsets is fully supported by SNPE opset 13.
+        With img_size=(256,512) both divisible by 16, the mismatch is at
+        most 1 pixel per side, so padding cost is negligible.
     """
 
     def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
+        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear",
+                                    align_corners=True)
         self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
-        # stride=2 conv replaces MaxPool2d — SNPE-safe, same spatial halving
-        self.down = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False)
 
-    def forward(self, x: torch.Tensor):
-        skip = self.conv(x)
-        down = self.down(skip)
-        return skip, down
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+
+        # Pad x to match skip spatial dims if there is a 1-pixel mismatch.
+        # Using F.pad with integer offsets produces a static shape op
+        # that SNPE can trace correctly -- unlike F.interpolate(size=skip.shape).
+        diff_h = skip.shape[2] - x.shape[2]
+        diff_w = skip.shape[3] - x.shape[3]
+        if diff_h != 0 or diff_w != 0:
+            x = F.pad(x, [
+                diff_w // 2, diff_w - diff_w // 2,   # left, right
+                diff_h // 2, diff_h - diff_h // 2,   # top,  bottom
+            ])
+
+        x = torch.cat([skip, x], dim=1)
+        return self.conv(x)
+
 
 class DroneROIUNet(nn.Module):
     """
@@ -130,10 +147,10 @@ class DroneROIUNet(nn.Module):
 
         # ── Decoder (light dropout — regularise reconstruction path) ──────────
         # Strategy 2: Dropout2d(0.1) inside each DecoderBlock's DoubleConv
-        self.dec3 = DecoderBlock(up_ch=f * 16, in_ch=f * 16 + f * 8, out_ch=f * 8, dropout_p=0.1)
-        self.dec2 = DecoderBlock(up_ch=f * 8, in_ch=f * 8 + f * 4, out_ch=f * 4, dropout_p=0.1)
-        self.dec1 = DecoderBlock(up_ch=f * 4, in_ch=f * 4 + f * 2, out_ch=f * 2, dropout_p=0.1)
-        self.dec0 = DecoderBlock(up_ch=f * 2, in_ch=f * 2 + f, out_ch=f, dropout_p=0.1)
+        self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  dropout_p=0.1)
+        self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  dropout_p=0.1)
+        self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  dropout_p=0.1)
+        self.dec0 = DecoderBlock(f * 2  + f,      f,      dropout_p=0.1)
 
         # ── Output head: 1×1 conv → Sigmoid ──────────────────────────────────
         self.head = nn.Sequential(
@@ -243,22 +260,34 @@ def _round_filters(f: int, w: float) -> int:
 def _round_repeats(n: int, d: float) -> int:
     return int(math.ceil(n * d))
 
+
 class SqueezeExcitation(nn.Module):
+    """
+    Channel-wise SE recalibration.
+
+    SNPE compatibility fix:
+        nn.AdaptiveAvgPool2d(1) is not supported by SNPE/QNN converters.
+        Replaced with x.mean(dim=[2,3], keepdim=True) which exports as
+        a ReduceMean ONNX op -- fully supported by SNPE opset 13.
+        Weight layout is unchanged so existing checkpoints load correctly.
+    """
+
     def __init__(self, in_ch: int, se_ratio: float = 0.25):
         super().__init__()
         sq = max(1, int(in_ch * se_ratio))
-        # No AdaptiveAvgPool2d -- use ReduceMean via x.mean() in forward
-        self.fc1 = nn.Conv2d(in_ch, sq, 1, bias=True)
+        # No AdaptiveAvgPool2d -- global avg done in forward() via .mean()
+        self.fc1  = nn.Conv2d(in_ch, sq, 1, bias=True)
         self.act  = nn.SiLU(inplace=True)
         self.fc2  = nn.Conv2d(sq, in_ch, 1, bias=True)
         self.gate = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # mean over H,W dims -- exports as ReduceMean, SNPE compatible
+        # ReduceMean over H,W -- static shape, SNPE compatible
         s = x.mean(dim=[2, 3], keepdim=True)   # (B, C, 1, 1)
         s = self.act(self.fc1(s))
         s = self.gate(self.fc2(s))
         return x * s
+
 
 class MBConvBlock(nn.Module):
     def __init__(
@@ -380,13 +409,17 @@ class DroneCLSNet(nn.Module):
             nn.SiLU(inplace=True),
         )
 
-        # ── Strategy 4: Softmax REMOVED — returns raw logits ─────────────────
+        # ── Strategy 4: Softmax REMOVED -- returns raw logits ────────────────
+        # SNPE compatibility fix:
+        #   AdaptiveAvgPool2d(1) removed from Sequential -- not supported by SNPE.
+        #   Flatten removed from Sequential -- done implicitly after .mean() in forward().
+        #   Global average pooling now done as x.mean(dim=[2,3]) in forward(),
+        #   which exports as ReduceMean and is fully supported by SNPE opset 13.
+        #   Checkpoint weights are unaffected -- Linear layer weights unchanged.
         self.classifier = nn.Sequential(
-            # nn.AdaptiveAvgPool2d(1),
-            # nn.Flatten(),
             nn.Dropout(p=dropout_rate),
             nn.Linear(head_f, num_classes),
-            # nn.Softmax(dim=1)  ← REMOVED: CrossEntropyLoss expects logits
+            # nn.Softmax(dim=1)  <- REMOVED: CrossEntropyLoss expects logits
         )
 
         self._init_weights()
@@ -410,7 +443,7 @@ class DroneCLSNet(nn.Module):
         Args:
             x : (B, C, 224, 224)
         Returns:
-            logits : (B, num_classes)  — raw scores, NO softmax applied
+            logits : (B, num_classes)  raw scores, NO softmax applied
         """
         x = self.stem(x)
         x = self.block1(x)
@@ -421,8 +454,10 @@ class DroneCLSNet(nn.Module):
         x = self.block6(x)
         x = self.block7(x)
         x = self.head_conv(x)
-        x = x.mean(dim=[2, 3])  # Global average pool as ReduceMean (SNPE safe)
-        return self.classifier(x)  # classifier now starts with Flatten->Dropout->Linear
+        # Global average pool as ReduceMean -- SNPE compatible
+        # replaces AdaptiveAvgPool2d(1) + Flatten from classifier Sequential
+        x = x.mean(dim=[2, 3])    # (B, head_f)
+        return self.classifier(x)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
