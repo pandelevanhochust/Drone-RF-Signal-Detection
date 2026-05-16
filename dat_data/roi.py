@@ -74,39 +74,39 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     """
-    Upsample 2×2 → pad to match skip → cat(skip) → DoubleConv.
+    Upsample 2x2 -> crop to static skip size -> cat(skip) -> DoubleConv.
 
-    SNPE/QNN compatibility fix:
-        The original code used F.interpolate(x, size=skip.shape[2:]) to
-        handle spatial size mismatches. This produces a dynamic shape op
-        that SNPE's shape inference cannot resolve statically, causing the
-        'Inconsistency in dynamic axis shapes' error during DLC conversion.
+    SNPE/QNN compatibility -- fully static shape version:
+        All previous approaches (F.interpolate, F.pad with runtime diff)
+        produce dynamic shape ops that SNPE cannot trace statically,
+        causing 'Inconsistency in dynamic axis shapes' during DLC conversion.
 
-        Replaced with F.pad() using statically-computable diff values.
-        F.pad with constant offsets is fully supported by SNPE opset 13.
-        With img_size=(256,512) both divisible by 16, the mismatch is at
-        most 1 pixel per side, so padding cost is negligible.
+        This version receives the exact target (H, W) as constructor
+        arguments computed at model build time from the known input size.
+        The upsample output is center-cropped to exactly (skip_h, skip_w)
+        using a fixed slice -- no runtime shape arithmetic at all.
+        Slicing with literal integers is a static op SNPE handles correctly.
     """
 
-    def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
+    def __init__(
+        self,
+        in_ch    : int,
+        out_ch   : int,
+        skip_h   : int,
+        skip_w   : int,
+        dropout_p: float = 0.0,
+    ):
         super().__init__()
+        self.skip_h   = skip_h
+        self.skip_w   = skip_w
         self.upsample = nn.Upsample(scale_factor=2, mode="bilinear",
                                     align_corners=True)
         self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-
-        # Always pad -- zero padding is a no-op when diff=0 but keeps
-        # the op in the ONNX graph so SNPE shape inference stays static.
-        # Removes the Python boolean branch that caused TracerWarning.
-        diff_h = skip.shape[2] - x.shape[2]
-        diff_w = skip.shape[3] - x.shape[3]
-        x = F.pad(x, [
-            diff_w // 2, diff_w - diff_w // 2,
-            diff_h // 2, diff_h - diff_h // 2,
-        ])
-
+        # Crop to known static target size -- no runtime shape ops
+        x = x[:, :, :self.skip_h, :self.skip_w]
         x = torch.cat([skip, x], dim=1)
         return self.conv(x)
 
@@ -115,55 +115,62 @@ class DroneROIUNet(nn.Module):
     """
     Drone-ROIs-Detection Model  (U-Net)
 
-    Strategy 2 — Dropout2d rates:
-        Encoder blocks  : 0.0   (no dropout — preserve spatial features)
-        Bottleneck      : 0.3   (highest dropout — most abstract features)
-        Decoder blocks  : 0.1   (light dropout — reconstruction path)
+    Strategy 2 -- Dropout2d rates:
+        Encoder blocks : 0.0  (preserve spatial features)
+        Bottleneck     : 0.3  (strongest regularisation)
+        Decoder blocks : 0.1  (light regularisation)
 
-    Strategy 3 — base_filters default is now 32 (was 64).
-        32  filters → ~8 M  parameters   ← new default
-        64  filters → ~31 M parameters   ← old default
-    Set base_filters=64 to restore the original capacity if needed.
+    Strategy 3 -- base_filters default 32 (~8M params, was 64/~31M).
+
+    SNPE fix -- DecoderBlock skip_h/skip_w computed statically from
+    img_size at construction time so no runtime shape arithmetic occurs
+    during the ONNX trace.
 
     Args:
         in_channels  : 1 (grayscale) or 3 (viridis RGB)
         base_filters : starting feature depth (default 32)
+        img_h        : input image height (default 256)
+        img_w        : input image width  (default 512)
     """
 
-    def __init__(self, in_channels: int = 3, base_filters: int = 32):
+    def __init__(
+        self,
+        in_channels : int = 3,
+        base_filters: int = 32,
+        img_h       : int = 256,
+        img_w       : int = 512,
+    ):
         super().__init__()
         f = base_filters
 
-        # ── Encoder (no dropout — preserve low-level spatial features) ────────
-        self.enc0 = EncoderBlock(in_channels, f,      dropout_p=0.0)
-        self.enc1 = EncoderBlock(f,           f * 2,  dropout_p=0.0)
-        self.enc2 = EncoderBlock(f * 2,       f * 4,  dropout_p=0.0)
-        self.enc3 = EncoderBlock(f * 4,       f * 8,  dropout_p=0.0)
+        # Pre-compute static skip sizes for each decoder level
+        s0_h, s0_w = img_h,      img_w
+        s1_h, s1_w = img_h // 2, img_w // 2
+        s2_h, s2_w = img_h // 4, img_w // 4
+        s3_h, s3_w = img_h // 8, img_w // 8
 
-        # ── Bottleneck (strongest dropout — regularise abstract features) ──────
-        # Strategy 2: Dropout2d(0.3) inside DoubleConv
+        # Encoder
+        self.enc0 = EncoderBlock(in_channels, f,     dropout_p=0.0)
+        self.enc1 = EncoderBlock(f,           f * 2, dropout_p=0.0)
+        self.enc2 = EncoderBlock(f * 2,       f * 4, dropout_p=0.0)
+        self.enc3 = EncoderBlock(f * 4,       f * 8, dropout_p=0.0)
+
+        # Bottleneck
         self.bottleneck = DoubleConv(f * 8, f * 16, dropout_p=0.3)
 
-        # ── Decoder (light dropout — regularise reconstruction path) ──────────
-        # Strategy 2: Dropout2d(0.1) inside each DecoderBlock's DoubleConv
-        self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  dropout_p=0.1)
-        self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  dropout_p=0.1)
-        self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  dropout_p=0.1)
-        self.dec0 = DecoderBlock(f * 2  + f,      f,      dropout_p=0.1)
+        # Decoder -- static skip sizes baked in as constructor args
+        self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  s3_h, s3_w, dropout_p=0.1)
+        self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  s2_h, s2_w, dropout_p=0.1)
+        self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  s1_h, s1_w, dropout_p=0.1)
+        self.dec0 = DecoderBlock(f * 2  + f,      f,      s0_h, s0_w, dropout_p=0.1)
 
-        # ── Output head: 1×1 conv → Sigmoid ──────────────────────────────────
+        # Output head
         self.head = nn.Sequential(
             nn.Conv2d(f, 1, kernel_size=1),
             nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x    : (B, C, H, W)
-        Returns:
-            mask : (B, 1, H, W)  values ∈ [0, 1]
-        """
         skip0, x = self.enc0(x)
         skip1, x = self.enc1(x)
         skip2, x = self.enc2(x)
@@ -481,18 +488,22 @@ class DronePipeline(nn.Module):
         self,
         num_classes: int        = 8,
         in_channels: int        = 3,
-        unet_base_filters: int  = 32,       # Strategy 3: default 32 (was 64)
+        unet_base_filters: int  = 32,
         roi_output_size: tuple  = (224, 224),
         mask_threshold: float   = 0.5,
         roi_strategy: str       = "multiply",
         cls_dropout: float      = 0.2,
         cls_drop_connect: float = 0.2,
+        img_h: int              = 256,
+        img_w: int              = 512,
     ):
         super().__init__()
 
         self.unet = DroneROIUNet(
             in_channels  = in_channels,
-            base_filters = unet_base_filters,   # Strategy 3
+            base_filters = unet_base_filters,
+            img_h        = img_h,
+            img_w        = img_w,
         )
 
         self.roi_extractor = ROIExtractor(
