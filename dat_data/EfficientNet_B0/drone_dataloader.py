@@ -20,8 +20,8 @@ CLASS_NAMES: list[str] = sorted([
     "MP1", "MP2", "NO_DRONE", "PHA",
 ])
 
-# ALL_SUBSETS: list[str] = ["BLUE", "BOTH", "CLEAN", "WIFI"]
-ALL_SUBSETS: list[str] = ["BOTH"]
+ALL_SUBSETS: list[str] = ["BLUE", "BOTH", "CLEAN", "WIFI"]
+# ALL_SUBSETS: list[str] = ["BOTH"]
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
@@ -128,7 +128,7 @@ class DroneSpectrogramDataset(Dataset):
     ):
         super().__init__()
         self.root      = Path(root).expanduser().resolve()
-        self.subsets   = subsets or ["BOTH"]
+        self.subsets   = subsets or ["BLUE", "BOTH", "CLEAN", "WIFI"]
         self.transform = transform or get_transforms("val", img_size)
         self.img_size  = img_size
 
@@ -318,7 +318,7 @@ def build_dataloaders(
     pin_memory: bool           = True,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
 
-    subsets = subsets or ["BOTH"]
+    subsets = subsets or ["BLUE", "BOTH", "CLEAN", "WIFI"]
 
     full_ds = DroneSpectrogramDataset(
         root      = root,

@@ -647,7 +647,7 @@ if __name__ == "__main__":
         description="Stage 2: EfficientNet-B0 fine-tuning on live ROI patches"
     )
     parser.add_argument("--root",             default="output_spectrograms/")
-    parser.add_argument("--subsets",          nargs="+", default=["BOTH"])
+    parser.add_argument("--subsets",          nargs="+", default=["BLUE", "BOTH", "CLEAN", "WIFI"])
     parser.add_argument("--img_size",         nargs=2, type=int, default=[256, 512])
     parser.add_argument("--batch_size",       type=int,   default=16)
     parser.add_argument("--workers",          type=int,   default=4)

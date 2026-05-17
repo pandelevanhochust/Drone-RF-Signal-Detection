@@ -463,7 +463,7 @@ if __name__ == "__main__":
         description="Stage 1: Train U-Net segmentation on STFT spectrograms"
     )
     parser.add_argument("--root",          default="output_spectrograms/")
-    parser.add_argument("--subsets",       nargs="+", default=["BOTH"])
+    parser.add_argument("--subsets",       nargs="+", default=["BLUE", "BOTH", "CLEAN", "WIFI"])
     parser.add_argument("--img_size",      nargs=2, type=int, default=[256, 512])
     parser.add_argument("--base_filters",  type=int,   default=32)
     parser.add_argument("--in_channels",   type=int,   default=3)
