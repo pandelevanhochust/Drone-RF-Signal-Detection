@@ -320,7 +320,7 @@ class DronePipelineLoss(nn.Module):
         self.seg_weight = seg_weight
         self.cls_weight = cls_weight
         self.seg_loss   = nn.BCELoss()
-        self.cls_loss   = nn.CrossEntropyLoss()
+        self.cls_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     def forward(
         self,
