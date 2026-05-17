@@ -67,59 +67,6 @@ from EfficientNetB0_Classification import DroneCLSNet, load_classifier
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SNPE compatibility patch
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _patch_mean_axes(model: nn.Module):
-    """
-    The legacy TorchScript ONNX exporter encodes .mean(dim=list) as a
-    ReduceMean node with axes as a *runtime tensor input* (dynamic).
-    SNPE requires axes to be a *static attribute* on the node.
-
-    Passing axes as a Python tuple instead of a list causes TorchScript
-    to fold them into the graph as constants during tracing, which the
-    exporter then serialises as a static ReduceMean attribute.
-
-    This patches every forward() that calls .mean(dim=[2,3,...]) so the
-    axes are tuples at trace time. No weights are changed.
-
-    Affected locations in our codebase
-    -----------------------------------
-    DroneCLSNet.forward          x.mean(dim=[2, 3])
-    SqueezeExcitation.forward    x.mean(dim=[2, 3], keepdim=True)
-    """
-    import types
-
-    # ── DroneCLSNet top-level pool ────────────────────────────────────────────
-    from EfficientNetB0_Classification import DroneCLSNet
-    if isinstance(model, DroneCLSNet):
-        original_forward = model.forward
-
-        def _patched_cls_forward(self, x):
-            x = self.stem(x)
-            x = self.block1(x);  x = self.block2(x);  x = self.block3(x)
-            x = self.block4(x);  x = self.block5(x);  x = self.block6(x)
-            x = self.block7(x)
-            x = self.head_conv(x)
-            x = x.mean(dim=(2, 3))          # tuple → static ReduceMean attr
-            return self.classifier(x)
-
-        model.forward = types.MethodType(_patched_cls_forward, model)
-
-    # ── SqueezeExcitation inside any model ───────────────────────────────────
-    from EfficientNetB0_Classification import SqueezeExcitation
-    for module in model.modules():
-        if isinstance(module, SqueezeExcitation):
-            def _patched_se_forward(self, x):
-                s = x.mean(dim=(2, 3), keepdim=True)   # tuple → static attr
-                s = self.act(self.fc1(s))
-                s = self.gate(self.fc2(s))
-                return x * s
-
-            module.forward = types.MethodType(_patched_se_forward, module)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  ONNX export
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -166,15 +113,6 @@ def export_onnx(
 
     unet_path = os.path.join(out_dir, "drone_unet.onnx")
     cls_path  = os.path.join(out_dir, "drone_classifier.onnx")
-
-    # ── Patch: replace .mean(dim=[2,3]) with a SNPE-safe wrapper ─────────────
-    # The dynamo exporter encodes list-axes as a runtime tensor input.
-    # The legacy (jit) exporter with dynamo=False encodes them as a static
-    # attribute — but only if the axes are passed as a tuple, not a list.
-    # We patch forward() on the classifier to use tuple axes.
-    # The U-Net's SqueezeExcitation.forward() also uses .mean — same fix.
-    _patch_mean_axes(cls_net)
-    _patch_mean_axes(unet)
 
     # ── Export U-Net ──────────────────────────────────────────────────────────
     # Input  : (1, 3, img_h, img_w)  normalised spectrogram

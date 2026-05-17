@@ -88,37 +88,129 @@ class EncoderBlock(nn.Module):
 
 class DecoderBlock(nn.Module):
     """
-    Upsample ×2 → crop to static (skip_h, skip_w) → cat(skip) → DoubleConv.
+    Base decoder block — do not instantiate directly.
+    Use make_decoder_block() which returns a concrete subclass with
+    literal-integer slice indices baked into the class body.
 
-    SNPE/QNN compatibility
-    ----------------------
-    skip_h and skip_w are integers baked in at construction time (computed
-    from img_h/img_w in DroneROIUNet.__init__). torch.narrow() with literal
-    integer arguments exports as a static Slice op. Dynamic alternatives
-    (F.pad with runtime shapes, x[:,:,:H,:W] with computed H/W) produce
-    dynamic shape ops that SNPE rejects during DLC conversion.
+    Why subclasses instead of a single class with self.skip_h
+    ----------------------------------------------------------
+    TorchScript's ONNX exporter serialises `x[:, :, :self.skip_h, :]` as a
+    Slice node where `end` is loaded from the module's attribute dict at
+    runtime — making it a dynamic input to the Slice op.  SNPE's shape
+    inference cannot resolve dynamic Slice ends and errors with:
+        "invalid stride 1 for begin 0 and end 0 at axis N"
+
+    The only way to produce a *static* Slice constant in the exported ONNX
+    is to write the integer literally in the Python source so TorchScript
+    folds it as a compile-time constant.  Each concrete subclass below does
+    exactly that — the integers are literals in the class body, not loaded
+    from self.
     """
 
-    def __init__(
-        self,
-        in_ch    : int,
-        out_ch   : int,
-        skip_h   : int,   # static, known at build time
-        skip_w   : int,
-        dropout_p: float = 0.0,
-    ):
+    def __init__(self, in_ch: int, out_ch: int, dropout_p: float = 0.0):
         super().__init__()
-        self.skip_h   = skip_h
-        self.skip_w   = skip_w
         self.upsample = nn.Upsample(scale_factor=2, mode="bilinear",
                                     align_corners=True)
         self.conv = DoubleConv(in_ch, out_ch, dropout_p=dropout_p)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("Use make_decoder_block()")
+
+
+# ── Concrete subclasses with literal-integer slices ───────────────────────────
+# One class per decoder level for each supported (img_h, img_w).
+# The slice indices are Python integer literals → TorchScript folds them
+# as ONNX Slice constants → SNPE resolves them statically.
+
+class _Dec256x512_L3(DecoderBlock):   # skip = img_h//8, img_w//8 = 32, 64
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
-        x = x.narrow(2, 0, self.skip_h)   # static height crop
-        x = x.narrow(3, 0, self.skip_w)   # static width  crop
+        x = x[:, :, :32, :64]
         return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec256x512_L2(DecoderBlock):   # skip = 64, 128
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :64, :128]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec256x512_L1(DecoderBlock):   # skip = 128, 256
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :128, :256]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec256x512_L0(DecoderBlock):   # skip = 256, 512
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :256, :512]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+
+# 128×256 variants (half resolution, for smaller GPU budgets)
+class _Dec128x256_L3(DecoderBlock):   # 16, 32
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :16, :32]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec128x256_L2(DecoderBlock):   # 32, 64
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :32, :64]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec128x256_L1(DecoderBlock):   # 64, 128
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :64, :128]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+class _Dec128x256_L0(DecoderBlock):   # 128, 256
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        x = x[:, :, :128, :256]
+        return self.conv(torch.cat([skip, x], dim=1))
+
+
+# Lookup table: (img_h, img_w) → [L3_cls, L2_cls, L1_cls, L0_cls]
+_DECODER_CLASSES = {
+    (256, 512): [_Dec256x512_L3, _Dec256x512_L2,
+                 _Dec256x512_L1, _Dec256x512_L0],
+    (128, 256): [_Dec128x256_L3, _Dec128x256_L2,
+                 _Dec128x256_L1, _Dec128x256_L0],
+}
+
+
+def make_decoder_block(
+    in_ch    : int,
+    out_ch   : int,
+    level    : int,     # 3 = deepest (smallest spatial), 0 = full resolution
+    img_h    : int,
+    img_w    : int,
+    dropout_p: float = 0.0,
+) -> DecoderBlock:
+    """
+    Return a concrete DecoderBlock subclass whose forward() uses literal
+    integer slice indices matching (img_h, img_w) at the given U-Net level.
+
+    level 3 → skip size = (img_h//8,  img_w//8)
+    level 2 → skip size = (img_h//4,  img_w//4)
+    level 1 → skip size = (img_h//2,  img_w//2)
+    level 0 → skip size = (img_h,     img_w)
+    """
+    key = (img_h, img_w)
+    if key not in _DECODER_CLASSES:
+        supported = list(_DECODER_CLASSES.keys())
+        raise ValueError(
+            f"No static decoder class for img_size=({img_h},{img_w}).\n"
+            f"Supported: {supported}\n"
+            f"Add a concrete subclass to stage1_unet.py for your resolution."
+        )
+    cls = _DECODER_CLASSES[key][3 - level]   # level 3→index 0, level 0→index 3
+    block = cls(in_ch, out_ch, dropout_p=dropout_p)
+    return block
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,12 +245,6 @@ class DroneROIUNet(nn.Module):
         super().__init__()
         f = base_filters
 
-        # Static skip dimensions computed once at build time
-        s0_h, s0_w = img_h,      img_w
-        s1_h, s1_w = img_h // 2, img_w // 2
-        s2_h, s2_w = img_h // 4, img_w // 4
-        s3_h, s3_w = img_h // 8, img_w // 8
-
         # Encoder (no dropout)
         self.enc0 = EncoderBlock(in_channels, f,     dropout_p=0.0)
         self.enc1 = EncoderBlock(f,           f * 2, dropout_p=0.0)
@@ -168,11 +254,14 @@ class DroneROIUNet(nn.Module):
         # Bottleneck
         self.bottleneck = DoubleConv(f * 8, f * 16, dropout_p=0.3)
 
-        # Decoder (light dropout, static skip sizes)
-        self.dec3 = DecoderBlock(f * 16 + f * 8, f * 8,  s3_h, s3_w, dropout_p=0.1)
-        self.dec2 = DecoderBlock(f * 8  + f * 4, f * 4,  s2_h, s2_w, dropout_p=0.1)
-        self.dec1 = DecoderBlock(f * 4  + f * 2, f * 2,  s1_h, s1_w, dropout_p=0.1)
-        self.dec0 = DecoderBlock(f * 2  + f,      f,      s0_h, s0_w, dropout_p=0.1)
+        # Decoder — concrete subclasses with literal-integer slice indices.
+        # make_decoder_block() selects the right subclass for (img_h, img_w)
+        # so TorchScript sees integer *literals* in forward(), not attribute
+        # loads, producing static ONNX Slice constants that SNPE accepts.
+        self.dec3 = make_decoder_block(f * 16 + f * 8, f * 8,  3, img_h, img_w, dropout_p=0.1)
+        self.dec2 = make_decoder_block(f * 8  + f * 4, f * 4,  2, img_h, img_w, dropout_p=0.1)
+        self.dec1 = make_decoder_block(f * 4  + f * 2, f * 2,  1, img_h, img_w, dropout_p=0.1)
+        self.dec0 = make_decoder_block(f * 2  + f,      f,     0, img_h, img_w, dropout_p=0.1)
 
         # Output head: 1-channel sigmoid mask
         self.head = nn.Sequential(

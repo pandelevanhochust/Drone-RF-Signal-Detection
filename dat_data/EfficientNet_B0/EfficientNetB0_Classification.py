@@ -47,7 +47,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from RoiExtractor import (
+from stage1_unet import (
     DroneROIUNet,
     ROIExtractor,
     build_proxy_mask,
@@ -90,7 +90,11 @@ class SqueezeExcitation(nn.Module):
         self.gate = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        s = x.mean(dim=[2, 3], keepdim=True)   # ReduceMean — SNPE-safe
+        # dim=(2,3) as a tuple — TorchScript folds tuple constants into the
+        # graph as static values, producing a ReduceMean node with axes as an
+        # attribute.  dim=[2,3] as a list is treated as a dynamic tensor input
+        # by the TorchScript tracer, which SNPE rejects ("axis must be >= 0").
+        s = x.mean(dim=(2, 3), keepdim=True)
         s = self.act(self.fc1(s))
         s = self.gate(self.fc2(s))
         return x * s
@@ -260,7 +264,7 @@ class DroneCLSNet(nn.Module):
         x = self.block4(x);  x = self.block5(x);  x = self.block6(x)
         x = self.block7(x)
         x = self.head_conv(x)
-        x = x.mean(dim=[2, 3])   # (B, 1280) — ReduceMean, SNPE-safe
+        x = x.mean(dim=(2, 3))   # tuple → static ReduceMean attr, SNPE-safe
         return self.classifier(x)
 
     # ── Granular freeze helpers ───────────────────────────────────────────────
@@ -320,7 +324,7 @@ class DronePipelineLoss(nn.Module):
         self.seg_weight = seg_weight
         self.cls_weight = cls_weight
         self.seg_loss   = nn.BCELoss()
-        self.cls_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+        self.cls_loss   = nn.CrossEntropyLoss()
 
     def forward(
         self,
