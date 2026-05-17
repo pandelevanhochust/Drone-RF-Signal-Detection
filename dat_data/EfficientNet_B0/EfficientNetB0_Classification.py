@@ -47,7 +47,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from stage1_unet import (
+from RoiExtractor import (
     DroneROIUNet,
     ROIExtractor,
     build_proxy_mask,
