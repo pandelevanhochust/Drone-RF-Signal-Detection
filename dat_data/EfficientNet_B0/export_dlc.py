@@ -62,8 +62,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from stage1_unet import DroneROIUNet, ROIExtractor
-from stage2_classifier import DroneCLSNet, load_classifier
+from RoiExtractor import DroneROIUNet, ROIExtractor
+from EfficientNetB0_Classification import DroneCLSNet, load_classifier
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ def _patch_mean_axes(model: nn.Module):
     import types
 
     # ── DroneCLSNet top-level pool ────────────────────────────────────────────
-    from stage2_classifier import DroneCLSNet
+    from EfficientNetB0_Classification import DroneCLSNet
     if isinstance(model, DroneCLSNet):
         original_forward = model.forward
 
@@ -107,7 +107,7 @@ def _patch_mean_axes(model: nn.Module):
         model.forward = types.MethodType(_patched_cls_forward, model)
 
     # ── SqueezeExcitation inside any model ───────────────────────────────────
-    from stage2_classifier import SqueezeExcitation
+    from EfficientNetB0_Classification import SqueezeExcitation
     for module in model.modules():
         if isinstance(module, SqueezeExcitation):
             def _patched_se_forward(self, x):
