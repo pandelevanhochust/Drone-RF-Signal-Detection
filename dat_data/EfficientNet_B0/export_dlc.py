@@ -62,8 +62,61 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from RoiExtractor import DroneROIUNet, ROIExtractor
-from EfficientNetB0_Classification import DroneCLSNet, load_classifier
+from stage1_unet import DroneROIUNet, ROIExtractor
+from stage2_classifier import DroneCLSNet, load_classifier
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SNPE compatibility patch
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _patch_mean_axes(model: nn.Module):
+    """
+    The legacy TorchScript ONNX exporter encodes .mean(dim=list) as a
+    ReduceMean node with axes as a *runtime tensor input* (dynamic).
+    SNPE requires axes to be a *static attribute* on the node.
+
+    Passing axes as a Python tuple instead of a list causes TorchScript
+    to fold them into the graph as constants during tracing, which the
+    exporter then serialises as a static ReduceMean attribute.
+
+    This patches every forward() that calls .mean(dim=[2,3,...]) so the
+    axes are tuples at trace time. No weights are changed.
+
+    Affected locations in our codebase
+    -----------------------------------
+    DroneCLSNet.forward          x.mean(dim=[2, 3])
+    SqueezeExcitation.forward    x.mean(dim=[2, 3], keepdim=True)
+    """
+    import types
+
+    # ── DroneCLSNet top-level pool ────────────────────────────────────────────
+    from stage2_classifier import DroneCLSNet
+    if isinstance(model, DroneCLSNet):
+        original_forward = model.forward
+
+        def _patched_cls_forward(self, x):
+            x = self.stem(x)
+            x = self.block1(x);  x = self.block2(x);  x = self.block3(x)
+            x = self.block4(x);  x = self.block5(x);  x = self.block6(x)
+            x = self.block7(x)
+            x = self.head_conv(x)
+            x = x.mean(dim=(2, 3))          # tuple → static ReduceMean attr
+            return self.classifier(x)
+
+        model.forward = types.MethodType(_patched_cls_forward, model)
+
+    # ── SqueezeExcitation inside any model ───────────────────────────────────
+    from stage2_classifier import SqueezeExcitation
+    for module in model.modules():
+        if isinstance(module, SqueezeExcitation):
+            def _patched_se_forward(self, x):
+                s = x.mean(dim=(2, 3), keepdim=True)   # tuple → static attr
+                s = self.act(self.fc1(s))
+                s = self.gate(self.fc2(s))
+                return x * s
+
+            module.forward = types.MethodType(_patched_se_forward, module)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +126,7 @@ from EfficientNetB0_Classification import DroneCLSNet, load_classifier
 def export_onnx(
     ckpt_path  : str,
     out_dir    : str  = "exports",
-    opset      : int  = 13,
+    opset      : int  = 17,
     img_h      : int  = 256,
     img_w      : int  = 512,
     batch_size : int  = 1,      # SNPE DLC conversion requires static batch=1
@@ -84,6 +137,20 @@ def export_onnx(
     Both are exported with a static batch dimension of 1.
     SNPE does not support dynamic batch axes in DLC conversion — runtime
     batching is handled by the SNPE execution framework, not the graph.
+
+    Opset notes
+    -----------
+    PyTorch >= 2.1 defaults to the dynamo-based ONNX exporter which:
+      - Ignores opset < 18 (upgrades silently to 18)
+      - Encodes .mean(dim=[2,3]) axes as a runtime tensor instead of a
+        static attribute → SNPE rejects with "axis must be >= 0" error
+      - Encodes torch.narrow() as dynamic Slice ops → SNPE rejects with
+        "Inconsistency in dynamic axis shapes" error
+
+    Fix: force the legacy TorchScript-based exporter via
+    torch.onnx.export(..., dynamo=False).  This keeps opset 17 and
+    encodes ReduceMean axes as graph attributes (static), which SNPE
+    accepts.  Opset 17 is the highest version SNPE reliably supports.
 
     Returns
     -------
@@ -100,24 +167,34 @@ def export_onnx(
     unet_path = os.path.join(out_dir, "drone_unet.onnx")
     cls_path  = os.path.join(out_dir, "drone_classifier.onnx")
 
+    # ── Patch: replace .mean(dim=[2,3]) with a SNPE-safe wrapper ─────────────
+    # The dynamo exporter encodes list-axes as a runtime tensor input.
+    # The legacy (jit) exporter with dynamo=False encodes them as a static
+    # attribute — but only if the axes are passed as a tuple, not a list.
+    # We patch forward() on the classifier to use tuple axes.
+    # The U-Net's SqueezeExcitation.forward() also uses .mean — same fix.
+    _patch_mean_axes(cls_net)
+    _patch_mean_axes(unet)
+
     # ── Export U-Net ──────────────────────────────────────────────────────────
     # Input  : (1, 3, img_h, img_w)  normalised spectrogram
     # Output : (1, 1, img_h, img_w)  sigmoid mask
     dummy_spec = torch.zeros(batch_size, 3, img_h, img_w)
 
     print(f"\n[Export] U-Net  {tuple(dummy_spec.shape)} → {unet_path}")
-    torch.onnx.export(
-        unet,
-        dummy_spec,
-        unet_path,
-        opset_version  = opset,
-        input_names    = ["spectrogram"],
-        output_names   = ["roi_mask"],
-        # Static batch — no dynamic axes for SNPE
-        dynamic_axes   = {},
-        do_constant_folding = True,
-        export_params  = True,
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            unet,
+            dummy_spec,
+            unet_path,
+            opset_version       = opset,
+            input_names         = ["spectrogram"],
+            output_names        = ["roi_mask"],
+            dynamic_axes        = {},           # fully static — required for SNPE
+            do_constant_folding = True,
+            export_params       = True,
+            dynamo              = False,        # force legacy jit exporter
+        )
     print(f"  ✓ U-Net ONNX saved  ({Path(unet_path).stat().st_size / 1e6:.1f} MB)")
 
     # ── Export Classifier ─────────────────────────────────────────────────────
@@ -126,17 +203,19 @@ def export_onnx(
     dummy_roi = torch.zeros(batch_size, 3, 224, 224)
 
     print(f"\n[Export] Classifier  {tuple(dummy_roi.shape)} → {cls_path}")
-    torch.onnx.export(
-        cls_net,
-        dummy_roi,
-        cls_path,
-        opset_version  = opset,
-        input_names    = ["roi_patch"],
-        output_names   = ["class_logits"],
-        dynamic_axes   = {},
-        do_constant_folding = True,
-        export_params  = True,
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            cls_net,
+            dummy_roi,
+            cls_path,
+            opset_version       = opset,
+            input_names         = ["roi_patch"],
+            output_names        = ["class_logits"],
+            dynamic_axes        = {},
+            do_constant_folding = True,
+            export_params       = True,
+            dynamo              = False,        # force legacy jit exporter
+        )
     print(f"  ✓ Classifier ONNX saved  ({Path(cls_path).stat().st_size / 1e6:.1f} MB)")
 
     # Save class name list alongside the ONNX files for on-device labelling
@@ -350,8 +429,8 @@ if __name__ == "__main__":
                         help="Stage-2 checkpoint (checkpoints/classifier_best.pt)")
     parser.add_argument("--out_dir",  default="exports",
                         help="Output directory for ONNX and DLC files")
-    parser.add_argument("--opset",    type=int, default=13,
-                        help="ONNX opset version (default 13, SNPE supports 9-13)")
+    parser.add_argument("--opset",    type=int, default=17,
+                        help="ONNX opset version (default 17, max SNPE supports reliably)")
     parser.add_argument("--img_h",    type=int, default=256)
     parser.add_argument("--img_w",    type=int, default=512)
     parser.add_argument("--validate", action="store_true",
