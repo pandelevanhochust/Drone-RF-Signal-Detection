@@ -313,15 +313,21 @@ def validate_fused_onnx(
 
     # ── Check 4: logit sanity (no accidental softmax) ─────────────────────────
     print("  Check 4/5  Logit sanity (no accidental softmax) ...")
-    exp   = np.exp(logits - logits.max())
-    p_sum = float(exp.sum())
-    if abs(p_sum - 1.0) < 1e-2:
-        print(f"    ⚠  softmax-sum ≈ {p_sum:.4f} — output may have softmax applied.")
+
+    # Correct test: softmax outputs are constrained to [0,1] and sum to 1
+    # WITHOUT applying exp. Raw logits will have values well outside [0,1].
+    already_probs = (
+            float(logits.min()) >= 0.0 and  # all non-negative
+            float(logits.max()) <= 1.0 and  # all <= 1
+            abs(float(logits.sum()) - 1.0) < 1e-2  # sum ≈ 1
+    )
+    if already_probs:
+        print(f"    ⚠  output looks like probabilities — values in [0,1] summing to 1.")
         print(f"       FusedDronePipeline.forward() should return raw logits.")
         all_ok = False
     else:
-        print(f"    ✓ Raw logits confirmed  (softmax-sum={p_sum:.3f}, "
-              f"expected >> 1 before softmax)")
+        print(f"    ✓ Raw logits confirmed  "
+              f"range=[{logits.min():.4f}, {logits.max():.4f}]")
 
     # ── Check 5: intermediate mask range via U-Net subgraph ──────────────────
     # Re-export just the U-Net output as an intermediate check node so we
