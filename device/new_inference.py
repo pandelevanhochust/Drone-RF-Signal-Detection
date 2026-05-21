@@ -133,7 +133,9 @@ def build_interpreter(model_path: str, use_npu: bool):
             print(f"[Setup] WARNING: could not load QNN delegate: {exc}")
             print(f"[Setup] Falling back to CPU-only inference.")
 
-    interp = Interpreter(model_path=model_path, experimental_delegates=delegates)
+    interp = Interpreter(
+            model_path=model_path,
+            experimental_delegates=delegates)
     interp.allocate_tensors()
     return interp
 
