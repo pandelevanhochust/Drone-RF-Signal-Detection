@@ -81,6 +81,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from ai_edge_litert.interpreter import Interpreter, load_delegate
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  RF / STFT constants  (must match training data collection params)

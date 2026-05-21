@@ -38,6 +38,7 @@ import os
 import time
 
 import numpy as np
+from ai_edge_litert.interpreter import Interpreter, load_delegate
 
 IMG_H, IMG_W        = 256, 512
 DELEGATE_LIB        = "libQnnTFLiteDelegate.so"
