@@ -110,7 +110,7 @@ def open_bladerf(gain: int = None):
 
     print("[BladeRF] Opening device ...")
     dev  = _bladerf.BladeRF()
-    info = dev.get_device_info()
+    info = dev.get_devinfo()
     print(f"  ✓ Found    : {info}")
 
     ch = _bladerf.CHANNEL_RX(0)
