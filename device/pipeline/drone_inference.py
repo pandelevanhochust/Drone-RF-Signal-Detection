@@ -87,7 +87,7 @@ class DroneInferencer:
             self.class_names = CLASS_NAMES_DEFAULT
 
         # ── Build interpreter ─────────────────────────────────────────────────
-        self.interp = self._build_interpreter(model_path, use_npu)
+        self.interp = self.build_interpreter(model_path, use_npu)
 
         inp = self.interp.get_input_details()[0]
         out = self.interp.get_output_details()[0]
