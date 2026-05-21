@@ -27,22 +27,17 @@ python main.py --skip_stage1 --resume checkpoints/classifier_best.pt
 """
 
 import argparse
-import os
-import time
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn as nn
 from tqdm import tqdm
 
-from drone_dataloader import build_dataloaders
+from dat_data.EfficientNet_B0.additional.drone_dataloader import build_dataloaders
 from RoiExtractor import (
     DroneROIUNet,
     ROIExtractor,
     build_proxy_mask,
     train_unet,
-    load_unet,
 )
 from EfficientNetB0_Classification import (
     DroneCLSNet,
@@ -105,7 +100,7 @@ def get_args():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def set_seed(seed: int):
-    import random, numpy as np
+    import numpy as np
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
