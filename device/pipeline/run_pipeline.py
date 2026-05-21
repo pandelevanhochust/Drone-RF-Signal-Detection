@@ -151,9 +151,9 @@ def get_args():
     p = argparse.ArgumentParser(
         description="BladeRF → STFT → Drone detection (RB3 Gen 2 NPU)"
     )
-    p.add_argument("--model",      default="../quantized_model/drone_pipeline_fused_quantized.tflite",
+    p.add_argument("--model",      default="../quantize_model/drone_pipeline_fused_quantized.tflite",
                    help="Path to fused quantized TFLite model")
-    p.add_argument("--labels",     default="../quantized_modelclass_names.txt",
+    p.add_argument("--labels",     default="../quantize_model/class_names.txt",
                    help="Path to class_names.txt")
     p.add_argument("--gain",       type=int, default=None,
                    help="BladeRF RX gain in dB (default: AGC)")
