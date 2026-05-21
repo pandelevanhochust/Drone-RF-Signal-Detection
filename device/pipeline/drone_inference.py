@@ -149,23 +149,32 @@ class DroneInferencer:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_interpreter(model_path: str, use_npu: bool):
-        from ai_edge_litert.interpreter import Interpreter, load_delegate
+    def build_interpreter(model_path: str, use_npu: bool):
+        """
+        Load the LiteRT interpreter with or without the QNN NPU delegate.
+        """
         delegates = []
         if use_npu:
             try:
-                delegates = [load_delegate(DELEGATE_LIB, {"backend_type": "htp"})]
-                print(f"[Inference] QNN delegate loaded  (HTP / Hexagon NPU)")
-            except Exception as exc:
-                print(f"[Inference] WARNING: QNN delegate failed ({exc})")
-                print(f"[Inference] Falling back to CPU-only inference.")
-        else:
-            print(f"[Inference] CPU-only mode (--cpu flag set)")
+                # Explicitly point to the Hexagon Tensor Processor (HTP) core and skel libraries
+                delegate_options = {
+                    "backend_type": "htp",
+                    "library_path": "/usr/lib/libQnnHtp.so",
+                    "skel_library_dir": "/usr/lib/rfsa/adsp"
+                }
 
-        interp = Interpreter(model_path=model_path, experimental_delegates=delegates)
+                qnn = load_delegate(DELEGATE_LIB, options=delegate_options)
+                delegates = [qnn]
+                print(f"[Setup] QNN delegate loaded successfully (Backend: HTP / Hexagon NPU)")
+            except Exception as exc:
+                print(f"[Setup] WARNING: could not load QNN delegate: {exc}")
+                print(f"[Setup] Falling back to CPU-only inference.")
+
+        interp = Interpreter(
+            model_path=model_path,
+            experimental_delegates=delegates)
         interp.allocate_tensors()
         return interp
-
     def _dequantise(self, raw: np.ndarray) -> np.ndarray:
         """
         Dequantise INT8 TFLite output to float32 logits.

@@ -55,6 +55,7 @@ import threading
 import time
 
 import numpy as np
+import bladerf
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  RF constants — edit here if your collection parameters differ
@@ -125,16 +126,16 @@ def open_bladerf(gain: int = None):
     print(f"  Bandwidth  : {dev.get_bandwidth(ch) / 1e6:.1f} MHz")
 
     if gain is not None:
-        dev.set_gain_mode(ch, _bladerf.GainMode.Manual)
+        dev.set_gain_mode(ch, bladerf._bladerf.GainMode.Manual)
         dev.set_gain(ch, gain)
         print(f"  Gain       : {gain} dB (manual)")
     else:
-        dev.set_gain_mode(ch, _bladerf.GainMode.FastAttack_AGC)
+        dev.set_gain_mode(ch, bladerf._bladerf.GainMode.FastAttack_AGC)
         print(f"  Gain       : AGC (fast attack)")
 
     dev.sync_config(
-        layout        = _bladerf.ChannelLayout.RX_X1,
-        fmt           = _bladerf.Format.SC16_Q11,
+        layout        = bladerf._bladerf.ChannelLayout.RX_X1,
+        fmt           = bladerf._bladerf.Format.SC16_Q11,
         num_buffers   = _NUM_BUFFERS,
         buffer_size   = _BUFFER_SIZE,
         num_transfers = _NUM_TRANSFERS,

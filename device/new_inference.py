@@ -112,30 +112,28 @@ def preprocess(image_path: str) -> np.ndarray:
 
 def build_interpreter(model_path: str, use_npu: bool):
     """
-    Load the TFLite interpreter with or without the QNN NPU delegate.
-
-    The QNN delegate uses backend_type='htp' which targets the Hexagon NPU
-    (HTP = Hexagon Tensor Processor) on the RB3 Gen 2.  Any ops the NPU
-    cannot handle fall back to CPU automatically — you will see a log line
-    like "N nodes delegated out of M nodes" indicating how many ran on NPU.
-
-    Falls back to CPU-only if the delegate library is not found, so the
-    script can also be used on a dev machine for debugging.
+    Load the LiteRT interpreter with or without the QNN NPU delegate.
     """
-
     delegates = []
     if use_npu:
         try:
-            qnn = load_delegate(DELEGATE_LIB, options={"backend_type": "htp"})
+            # Explicitly point to the Hexagon Tensor Processor (HTP) core and skel libraries
+            delegate_options = {
+                "backend_type": "htp",
+                "library_path": "/usr/lib/libQnnHtp.so",
+                "skel_library_dir": "/usr/lib/rfsa/adsp"
+            }
+
+            qnn = load_delegate(DELEGATE_LIB, options=delegate_options)
             delegates = [qnn]
-            print(f"[Setup] QNN delegate loaded  (backend: HTP / Hexagon NPU)")
+            print(f"[Setup] QNN delegate loaded successfully (Backend: HTP / Hexagon NPU)")
         except Exception as exc:
             print(f"[Setup] WARNING: could not load QNN delegate: {exc}")
             print(f"[Setup] Falling back to CPU-only inference.")
 
     interp = Interpreter(
-            model_path=model_path,
-            experimental_delegates=delegates)
+        model_path=model_path,
+        experimental_delegates=delegates)
     interp.allocate_tensors()
     return interp
 

@@ -277,21 +277,30 @@ def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_interpreter(model_path: str, use_npu: bool):
-    from ai_edge_litert.interpreter import Interpreter, load_delegate
+    """
+    Load the LiteRT interpreter with or without the QNN NPU delegate.
+    """
     delegates = []
     if use_npu:
         try:
-            delegates = [load_delegate(DELEGATE_LIB, {"backend_type": "htp"})]
-            print(f"[TFLite] QNN delegate loaded  (HTP / Hexagon NPU)")
-        except Exception as e:
-            print(f"[TFLite] WARNING: QNN delegate failed ({e}) — falling back to CPU")
-    interp = Interpreter(model_path=model_path, experimental_delegates=delegates)
+            # Explicitly point to the Hexagon Tensor Processor (HTP) core and skel libraries
+            delegate_options = {
+                "backend_type": "htp",
+                "library_path": "/usr/lib/libQnnHtp.so",
+                "skel_library_dir": "/usr/lib/rfsa/adsp"
+            }
+
+            qnn = load_delegate(DELEGATE_LIB, options=delegate_options)
+            delegates = [qnn]
+            print(f"[Setup] QNN delegate loaded successfully (Backend: HTP / Hexagon NPU)")
+        except Exception as exc:
+            print(f"[Setup] WARNING: could not load QNN delegate: {exc}")
+            print(f"[Setup] Falling back to CPU-only inference.")
+
+    interp = Interpreter(
+        model_path=model_path,
+        experimental_delegates=delegates)
     interp.allocate_tensors()
-    inp     = interp.get_input_details()[0]
-    out     = interp.get_output_details()[0]
-    print(f"[TFLite] Input  : {inp['shape']}  dtype={inp['dtype']}")
-    print(f"[TFLite] Output : {out['shape']}  "
-          f"quant=(scale={out['quantization'][0]:.6f}, zp={out['quantization'][1]})\n")
     return interp
 
 
