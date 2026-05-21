@@ -12,7 +12,7 @@ except ImportError:
 # =====================================================================
 # CONFIGURATION & PATH SETUP
 # =====================================================================
-MODEL_PATH = "drone_classifier_quantized.tflite"
+MODEL_PATH = "quantize model/drone_pipeline_fused_quantized.tflite"
 TEST_IMAGE_PATH = "sample_spectrogram.png"
 
 # Verify hardware asset existence
