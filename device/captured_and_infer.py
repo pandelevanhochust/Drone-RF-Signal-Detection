@@ -415,8 +415,8 @@ def get_args():
     p = argparse.ArgumentParser(
         description="BladeRF capture → STFT → drone TFLite inference (RB3 Gen 2)"
     )
-    p.add_argument("--model",    default="drone_pipeline_fused_quantized.tflite")
-    p.add_argument("--labels",   default="class_names.txt")
+    p.add_argument("--model",    default="quantize_model/drone_pipeline_fused_quantized.tflite")
+    p.add_argument("--labels",   default="quantize_model/class_names.txt")
     p.add_argument("--gain",     type=int, default=None,
                    help="RX gain in dB (default: AGC)")
     p.add_argument("--cpu",      action="store_true",
