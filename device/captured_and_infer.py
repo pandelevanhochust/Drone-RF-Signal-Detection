@@ -116,24 +116,13 @@ DELEGATE_LIB    = "libQnnTFLiteDelegate.so"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def open_bladerf(gain: int = None):
-    """
-    Open the first available BladeRF device and configure RX channel 0.
-
-    The BladeRF Python bindings wrap libbladeRF via ctypes.
-    bladerf.BladeRF() opens the first USB device found — pass
-    bladerf.BladeRF("*:serial=XXXX") to target a specific unit.
-
-    SC16Q11 format: each sample is a pair of int16 (I, Q) with
-    values in [-2048, 2047] (12-bit data in a 16-bit container).
-    Conversion to complex float32: samples / 2048.0
-    """
     try:
         import bladerf
+        from bladerf import _bladerf  # Clean access to core C-bindings
     except ImportError:
         raise ImportError(
             "bladerf Python bindings not found.\n"
-            "  pip3 install bladerf\n"
-            "  or build from source: https://github.com/Nuand/bladeRF"
+            "  pip3 install bladerf"
         )
 
     print("[BladeRF] Opening device ...")
@@ -141,37 +130,36 @@ def open_bladerf(gain: int = None):
     info = dev.get_devinfo()
     print(f"  ✓ Device  : {info}")
 
-    ch = bladerf.CHANNEL_RX(0)
+    ch = _bladerf.CHANNEL_RX(0)
 
     # Frequency
     dev.set_frequency(ch, CENTER_FREQ_HZ)
-    actual_freq = dev.get_frequency(ch)
-    print(f"  Center freq : {actual_freq/1e9:.4f} GHz")
+    print(f"  Center freq : {dev.get_frequency(ch)/1e9:.4f} GHz")
 
     # Sample rate
     dev.set_sample_rate(ch, SAMPLE_RATE_HZ)
-    actual_sr = dev.get_sample_rate(ch)
-    print(f"  Sample rate : {actual_sr/1e6:.1f} MHz")
+    print(f"  Sample rate : {dev.get_sample_rate(ch)/1e6:.1f} MHz")
 
     # Bandwidth
     dev.set_bandwidth(ch, BANDWIDTH_HZ)
-    actual_bw = dev.get_bandwidth(ch)
-    print(f"  Bandwidth   : {actual_bw/1e6:.1f} MHz")
+    print(f"  Bandwidth   : {dev.get_bandwidth(ch)/1e6:.1f} MHz")
 
-    # Gain — use AGC if not specified
+    # Gain configuration (Forced manual fallback because hardware lacks calibration tables)
     if gain is not None:
-        dev.set_gain_mode(ch, bladerf.GainMode.Manual)
+        dev.set_gain_mode(ch, _bladerf.GainMode.Manual)
         dev.set_gain(ch, gain)
         print(f"  Gain        : {gain} dB (manual)")
     else:
-        dev.set_gain_mode(ch, bladerf.GainMode.FastAttack_AGC)
-        print(f"  Gain        : AGC (fast attack)")
+        # Default safety fallback to manual mode to circumvent missing AGC table warnings
+        fallback_gain = 30
+        dev.set_gain_mode(ch, _bladerf.GainMode.Manual)
+        dev.set_gain(ch, fallback_gain)
+        print(f"  Gain        : {fallback_gain} dB (Forced Manual Fallback - No Device AGC Table)")
 
-    # Configure sync interface: SC16Q11, 1 channel, 16 buffers of 8192 samples
-    # num_transfers=8 keeps USB pipeline full to avoid sample drops
+    # Configure sync interface
     dev.sync_config(
-        layout          = bladerf.ChannelLayout.RX_X1,
-        fmt             = bladerf.Format.SC16_Q11,
+        layout          = _bladerf.ChannelLayout.RX_X1,
+        fmt             = _bladerf.Format.SC16_Q11,
         num_buffers     = 16,
         buffer_size     = 8192,
         num_transfers   = 8,
@@ -519,7 +507,8 @@ def main():
     )
 
     cap_thread.join(timeout=3.0)
-    dev.enable_module(bladerf.CHANNEL_RX(0), False)
+    from bladerf import _bladerf
+    dev.enable_module(_bladerf.CHANNEL_RX(0), False)
     dev.close()
     print("[Done]")
 
