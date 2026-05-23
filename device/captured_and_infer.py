@@ -201,63 +201,45 @@ def capture_frame(dev) -> np.ndarray:
 
 def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     """
-    Convert one 80 ms IQ frame to a log-power STFT spectrogram,
-    then resize to (IMG_H=256, IMG_W=512) to match model input.
-
-    Steps
-    -----
-    1. Segment IQ into overlapping windows of NFFT=256 samples, hop=128
-    2. Apply Hann window to each segment
-    3. FFT each windowed segment → complex spectrum
-    4. fftshift: move DC to centre (matches training data format)
-    5. Power: 10 * log10(|X|^2 + 1e-12)  [dB, epsilon avoids log(0)]
-    6. Normalise to [0, 1] using frame-local min/max
-    7. Resize to (256, 512) using bilinear interpolation (PIL)
-
-    Number of time steps for 80 ms @ 60 MHz with hop=128:
-        n_frames = (4_800_000 - 256) // 128 + 1 = 37_497 columns
-    This is much wider than 512 — PIL bilinear resize handles compression.
-
-    Returns
-    -------
-    spec_rgb : float32 ndarray (3, 256, 512)  ImageNet-normalised NCHW
-               Values not clipped to [0,1] after normalisation (logits ok).
+    Optimized STFT computation. Bypasses the 37,497 column bottleneck
+    by downsampling the time axis before running the FFT math.
     """
-    n = len(iq)
-    # Build frame indices: shape (n_frames, NFFT)
-    n_frames    = (n - NFFT) // HOP + 1
-    idx         = np.arange(NFFT)[None, :] + HOP * np.arange(n_frames)[:, None]
-    frames      = iq[idx]                          # (n_frames, NFFT)
+    # Instead of hopping by 128 samples, calculate a hop size that
+    # yields EXACTLY 512 time steps natively!
+    # 4,800,000 samples / 512 columns = ~9375 hop size
+    TARGET_WIDTH = 512
+    OPT_HOP = (len(iq) - NFFT) // (TARGET_WIDTH - 1)
 
-    # Apply Hann window and FFT
-    frames      = frames * WINDOW[None, :]         # (n_frames, NFFT)
-    spectrum    = np.fft.fft(frames, axis=1)       # (n_frames, NFFT) complex
-    spectrum    = np.fft.fftshift(spectrum, axes=1) # DC to centre
+    # Build a tight, tiny index grid of exactly 512 columns instead of 37,497
+    idx = np.arange(NFFT)[None, :] + OPT_HOP * np.arange(TARGET_WIDTH)[:, None]
+    frames = iq[idx]  # Small matrix: (512, 256) instead of (37497, 256)
 
-    # Log power spectrogram, shape (n_frames, NFFT) → transpose (NFFT, n_frames)
-    power       = 10.0 * np.log10(np.abs(spectrum) ** 2 + 1e-12)
-    power       = power.T                          # (freq_bins=256, time_steps)
+    # Apply Hann window and run only 512 FFTs
+    frames = frames * WINDOW[None, :]
+    spectrum = np.fft.fft(frames, axis=1)
+    spectrum = np.fft.fftshift(spectrum, axes=1)
 
-    # Normalise to [0, 255] uint8 for PIL resize (bilinear on float is same)
+    # Log power calculation
+    power = 10.0 * np.log10(np.abs(spectrum) ** 2 + 1e-12)
+    power = power.T  # Shape: (256, 512) - Already perfectly sized!
+
+    # Local Min/Max normalisation
     p_min, p_max = power.min(), power.max()
     if p_max > p_min:
         power = (power - p_min) / (p_max - p_min)
     else:
-        power = np.zeros_like(power)               # silent frame → all zeros
+        power = np.zeros_like(power)
 
-    # Resize to (IMG_H, IMG_W) using PIL bilinear
-    # PIL Image expects HWC uint8 or HW float; we use uint8 for speed
-    uint8_img   = (power * 255).clip(0, 255).astype(np.uint8)
-    pil_img     = Image.fromarray(uint8_img, mode="L")          # grayscale
-    pil_img     = pil_img.resize((IMG_W, IMG_H), Image.BILINEAR) # (W, H)
-    pil_rgb     = pil_img.convert("RGB")                        # L → RGB
+        # Convert directly to standard RGB format without utilizing PIL resize loops
+    uint8_img = (power * 255).clip(0, 255).astype(np.uint8)
 
-    # Convert to float32 array and ImageNet-normalise — matches
-    # drone_dataloader.get_transforms('val') exactly.
-    arr         = np.array(pil_rgb, dtype=np.float32) / 255.0   # HWC [0,1]
-    arr         = (arr - IMAGENET_MEAN) / IMAGENET_STD           # HWC norm
-    arr         = arr.transpose(2, 0, 1)                         # CHW
-    arr         = arr[np.newaxis]                                # (1,3,H,W)
+    # Fast grayscale to 3-Channel RGB stack using numpy views
+    rgb_arr = np.stack([uint8_img] * 3, axis=-1).astype(np.float32) / 255.0
+
+    # ImageNet normalisation
+    arr = (rgb_arr - IMAGENET_MEAN) / IMAGENET_STD
+    arr = arr.transpose(2, 0, 1)  # HWC to CHW
+    arr = arr[np.newaxis]  # CHW to NCHW
     return arr.astype(np.float32)
 
 
