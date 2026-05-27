@@ -67,8 +67,8 @@ class DroneInferencer:
 
     def __init__(
         self,
-        model_path  : str,
-        labels_path : str = "class_names.txt",
+        model_path  : str = '../quantize_model/drone_classifier_quantized.tflite',
+        labels_path : str = "../quantize_model/class_names.txt",
         use_npu     : bool = True,
     ):
         if not os.path.exists(model_path):
