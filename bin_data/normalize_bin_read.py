@@ -34,18 +34,20 @@ def compute_spectrogram_final(file_path, sample_rate, center_freq, start_ms=0, d
 
 
 # --- Execution ---
-FILE_PATH = r"non_toan-001.bin"
+# FILE_PATH = r"non_toan-001.bin"
 # FILE_PATH = r"DJI_B1_21_04_2026/dji_cao50_xa100_low.bin"
 # FILE_PATH = r"DJI_B1_23_04/dji_fly50_up.bin"
+FILE_PATH = r"C:\Users\Navis\captured.bin"
 
-FS = 60e6
-CENTER_FREQ = 2.45e9
+
+FS = 25e6
+CENTER_FREQ = 2.375e9
 
 # FILE_PATH = r"MAV_1110_04.dat"
 # FS = 60e6
 # CENTER_FREQ = 2.375e9
 
-f, t, Zxx = compute_spectrogram_final(FILE_PATH, FS, CENTER_FREQ,start_ms=2000,duration_ms=80)
+f, t, Zxx = compute_spectrogram_final(FILE_PATH, FS, CENTER_FREQ,start_ms=0,duration_ms=100)
 
 # Convert to dB
 spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-12)
