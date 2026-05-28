@@ -53,7 +53,7 @@ from scipy.signal.windows import hamming
 #  Constants — matched to training script
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLE_RATE_HZ = 60_000_000
+SAMPLE_RATE_HZ = 50_000_000        # matches USRP X300 at 200 MHz / 4
 NFFT           = 1024
 NOVERLAP       = 0                  # hop = NFFT - NOVERLAP = 1024
                                     # training default is 512 but 0 is
@@ -61,6 +61,14 @@ NOVERLAP       = 0                  # hop = NFFT - NOVERLAP = 1024
 WINDOW         = hamming(NFFT)      # matches training windows.hamming(nfft)
 
 IMG_H, IMG_W   = 256, 512
+
+# Anti-aliasing filter skirt crop
+# BladeRF's hardware filter creates energy rolloff at the top and bottom
+# ~12% of the band. Cropping removes this before normalisation so the
+# U-Net doesn't confuse the rolloff gradient with drone signal boundaries.
+# Set to 0.0 to disable cropping entirely.
+# Tune: increase if skirt artefacts persist, decrease if signal is clipped.
+SKIRT_CROP     = 0.12               # fraction of NFFT to crop each edge
 
 IMAGENET_MEAN  = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD   = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -74,6 +82,73 @@ _VIRIDIS_LUT = (
 # ─────────────────────────────────────────────────────────────────────────────
 #  Core transform
 # ─────────────────────────────────────────────────────────────────────────────
+
+def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np.ndarray:
+    """
+    Debug version of iq_to_spectrogram that saves a PNG at every
+    intermediate step so you can visually inspect each stage.
+
+    Saves:
+        step1_raw_db.png       — raw dB spectrogram (matplotlib viridis via savefig)
+        step2_norm8.png        — after min-max normalise + freq flip, before resize
+        step3_small.png        — after resize to (256, 512), before colormap
+        step4_rgb.png          — after viridis LUT applied (true model input colours)
+        step5_final.png        — after ImageNet normalise then undone (== step4)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(debug_dir, exist_ok=True)
+
+    # Step 1: scipy STFT
+    _, _, Zxx = scipy_stft(iq, fs=SAMPLE_RATE_HZ, window=WINDOW,
+                           nperseg=NFFT, noverlap=NOVERLAP, return_onesided=False)
+    Zxx     = np.fft.fftshift(Zxx, axes=0)
+    spec_db = 10.0 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
+
+    # Save step 1 — raw dB via matplotlib (exactly like training script)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.imshow(spec_db, aspect="auto", origin="lower", cmap="viridis")
+    ax.axis("off")
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    plt.savefig(os.path.join(debug_dir, "step1_raw_db.png"),
+                dpi=100, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    print(f"  [debug] step1_raw_db.png  dB range=[{spec_db.min():.1f}, {spec_db.max():.1f}]")
+
+    # Step 2: crop skirt + normalise + flip
+    skirt = int(NFFT * SKIRT_CROP)
+    spec_db_crop = spec_db[skirt : NFFT - skirt, :]
+    s_min, s_max = float(spec_db_crop.min()), float(spec_db_crop.max())
+    denom = s_max - s_min if s_max > s_min else 1.0
+    norm8 = ((spec_db_crop[::-1] - s_min) / denom * 255).clip(0, 255).astype(np.uint8)
+    Image.fromarray(norm8, mode="L").save(os.path.join(debug_dir, "step2_norm8.png"))
+    print(f"  [debug] step2_norm8.png   shape={norm8.shape}  (skirt={skirt}px each edge cropped)")
+
+    # Step 3: resize to (256, 512)
+    small = np.array(Image.fromarray(norm8, mode="L").resize((IMG_W, IMG_H), Image.BILINEAR))
+    Image.fromarray(small, mode="L").save(os.path.join(debug_dir, "step3_small.png"))
+    print(f"  [debug] step3_small.png   shape={small.shape}  uint8")
+
+    # Step 4: viridis LUT
+    rgb = _VIRIDIS_LUT[small]
+    Image.fromarray(rgb, mode="RGB").save(os.path.join(debug_dir, "step4_rgb.png"))
+    print(f"  [debug] step4_rgb.png     shape={rgb.shape}  RGB before normalise")
+
+    # Step 5: ImageNet normalise → NCHW → undo for save
+    arr    = rgb.astype(np.float32) / 255.0
+    arr    = (arr - IMAGENET_MEAN) / IMAGENET_STD
+    tensor = arr.transpose(2, 0, 1)[np.newaxis].astype(np.float32)
+
+    # Save step 5 — undo normalise to verify round-trip
+    arr_back = tensor[0].transpose(1, 2, 0) * IMAGENET_STD + IMAGENET_MEAN
+    Image.fromarray((arr_back * 255).clip(0, 255).astype(np.uint8)).save(
+        os.path.join(debug_dir, "step5_final.png"))
+    print(f"  [debug] step5_final.png   should match step4_rgb.png exactly")
+
+    return tensor
+
 
 def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     """
@@ -115,14 +190,21 @@ def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     # ── Step 3: dB scale (matches training 10*log10(|Zxx|^2 + 1e-10)) ────────
     spec_db = 10.0 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
 
-    # ── Step 4: normalise → uint8, flip freq axis (origin='lower') ───────────
-    s_min, s_max = float(spec_db.min()), float(spec_db.max())
+    # ── Step 4: crop filter skirt, normalise, flip freq axis ────────────────
+    # BladeRF anti-aliasing filter creates energy rolloff at the top and
+    # bottom ~12% of the frequency band. These skirt regions have a distinct
+    # energy gradient that the U-Net mistakes for drone signal boundaries.
+    # Cropping them out before normalisation removes this artefact.
+    skirt = int(NFFT * SKIRT_CROP)                # rows to remove each edge
+    spec_db_crop = spec_db[skirt : NFFT - skirt, :]   # (crop_bins, n_frames)
+
+    s_min, s_max = float(spec_db_crop.min()), float(spec_db_crop.max())
     denom = s_max - s_min if s_max > s_min else 1.0
-    norm8 = ((spec_db[::-1] - s_min) / denom * 255).clip(0, 255).astype(np.uint8)
-    # norm8 shape: (1024, 4689)
+    norm8 = ((spec_db_crop[::-1] - s_min) / denom * 255).clip(0, 255).astype(np.uint8)
+    # norm8 shape: (crop_bins, n_frames) — skirts removed
 
     # ── Step 5: resize grayscale BEFORE colormap ──────────────────────────────
-    # Compress (1024, 4689) → (256, 512) as uint8 grayscale first,
+    # Compress (crop_bins, n_frames) → (256, 512) as uint8 grayscale first,
     # then apply LUT on 131K pixels instead of 4.8M → ~10× faster colormap.
     small = np.array(
         Image.fromarray(norm8, mode="L").resize((IMG_W, IMG_H), Image.BILINEAR)
