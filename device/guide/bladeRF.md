@@ -57,7 +57,7 @@ python3 capture_and_infer.py --cpu
 # Manual gain instead of AGC
 python3 capture_and_infer.py --gain 30
 
-# Capture and save debug spectrograms without running inference
+# Capture and save debug_old spectrograms without running inference
 python3 capture_and_infer.py --save_dir debug_specs/ --no_infer
 ```
 

@@ -37,7 +37,7 @@ and colormap are identical. Benchmark: ~200 ms on sandbox, ~40-60 ms on RB3.
 Standalone test
 ---------------
     python3 stft_preprocessor.py
-    # Saves debug PNGs to debug_stft/ — compare with training spectrograms
+    # Saves debug_old PNGs to debug_stft/ — compare with training spectrograms
 """
 
 import os
@@ -53,7 +53,7 @@ from scipy.signal.windows import hamming
 #  Constants — matched to training script
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLE_RATE_HZ = 50_000_000        # matches USRP X300 at 200 MHz / 4
+SAMPLE_RATE_HZ = 25_000_000        # matches training --fs 25e6
 NFFT           = 1024
 NOVERLAP       = 0                  # hop = NFFT - NOVERLAP = 1024
                                     # training default is 512 but 0 is
@@ -115,7 +115,7 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     plt.savefig(os.path.join(debug_dir, "step1_raw_db.png"),
                 dpi=100, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
-    print(f"  [debug] step1_raw_db.png  dB range=[{spec_db.min():.1f}, {spec_db.max():.1f}]")
+    print(f"  [debug_old] step1_raw_db.png  dB range=[{spec_db.min():.1f}, {spec_db.max():.1f}]")
 
     # Step 2: crop skirt + normalise + flip
     skirt = int(NFFT * SKIRT_CROP)
@@ -124,17 +124,17 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     denom = s_max - s_min if s_max > s_min else 1.0
     norm8 = ((spec_db_crop[::-1] - s_min) / denom * 255).clip(0, 255).astype(np.uint8)
     Image.fromarray(norm8, mode="L").save(os.path.join(debug_dir, "step2_norm8.png"))
-    print(f"  [debug] step2_norm8.png   shape={norm8.shape}  (skirt={skirt}px each edge cropped)")
+    print(f"  [debug_old] step2_norm8.png   shape={norm8.shape}  (skirt={skirt}px each edge cropped)")
 
     # Step 3: resize to (256, 512)
     small = np.array(Image.fromarray(norm8, mode="L").resize((IMG_W, IMG_H), Image.BILINEAR))
     Image.fromarray(small, mode="L").save(os.path.join(debug_dir, "step3_small.png"))
-    print(f"  [debug] step3_small.png   shape={small.shape}  uint8")
+    print(f"  [debug_old] step3_small.png   shape={small.shape}  uint8")
 
     # Step 4: viridis LUT
     rgb = _VIRIDIS_LUT[small]
     Image.fromarray(rgb, mode="RGB").save(os.path.join(debug_dir, "step4_rgb.png"))
-    print(f"  [debug] step4_rgb.png     shape={rgb.shape}  RGB before normalise")
+    print(f"  [debug_old] step4_rgb.png     shape={rgb.shape}  RGB before normalise")
 
     # Step 5: ImageNet normalise → NCHW → undo for save
     arr    = rgb.astype(np.float32) / 255.0
@@ -145,7 +145,7 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     arr_back = tensor[0].transpose(1, 2, 0) * IMAGENET_STD + IMAGENET_MEAN
     Image.fromarray((arr_back * 255).clip(0, 255).astype(np.uint8)).save(
         os.path.join(debug_dir, "step5_final.png"))
-    print(f"  [debug] step5_final.png   should match step4_rgb.png exactly")
+    print(f"  [debug_old] step5_final.png   should match step4_rgb.png exactly")
 
     return tensor
 
@@ -163,7 +163,7 @@ def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     ----------
     iq : complex64 ndarray, shape (N,)
         One 80 ms IQ frame from BladeRF.
-        N = 4,800,000  (60 MHz × 0.080 s)
+        N = 2,000,000  (60 MHz × 0.080 s)
         Must be float32 complex (complex64) — BladeRF SC16Q11 already
         converted via (int16 / 2048.0) in capture_frame().
 

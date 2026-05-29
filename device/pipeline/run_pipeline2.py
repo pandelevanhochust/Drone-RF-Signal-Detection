@@ -50,7 +50,7 @@ Usage
     # CPU inference only (no QNN delegate — useful for debugging)
     python3 run_pipeline.py --cpu
 
-    # Save debug spectrogram PNGs without running inference
+    # Save debug_old spectrogram PNGs without running inference
     python3 run_pipeline.py --save_dir debug_specs/ --no_infer
 
     # Increase frame buffer if USB and NPU are both under load
@@ -98,7 +98,7 @@ def processing_loop(
     inferencer  : DroneInferencer instance (None if no_infer=True)
     stop_event  : set by SIGINT handler to exit cleanly
     sender      : TelemetrySender instance (None to skip telemetry)
-    save_dir    : if set, saves each spectrogram as a debug PNG
+    save_dir    : if set, saves each spectrogram as a debug_old PNG
     no_infer    : if True, only runs STFT (skips inference and telemetry)
     """
     if save_dir:
@@ -118,7 +118,7 @@ def processing_loop(
         tensor  = iq_to_spectrogram(iq)
         stft_ms = (time.perf_counter() - t0) * 1000
 
-        # ── Optional debug save ───────────────────────────────────────────────
+        # ── Optional debug_old save ───────────────────────────────────────────────
         if save_dir:
             path = os.path.join(save_dir, f"frame_{frame_idx:06d}.png")
             save_spectrogram_png(tensor, path)
@@ -170,7 +170,7 @@ def get_args():
     p.add_argument("--cpu",        action="store_true",
                    help="Disable NPU delegate, run inference on CPU only")
     p.add_argument("--save_dir",   default=None,
-                   help="Save debug spectrogram PNGs to this folder")
+                   help="Save debug_old spectrogram PNGs to this folder")
     p.add_argument("--no_infer",   action="store_true",
                    help="STFT only — skip inference (useful for spectrogram debugging)")
     p.add_argument("--no_telemetry", action="store_true",

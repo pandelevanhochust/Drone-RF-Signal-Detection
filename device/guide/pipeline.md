@@ -42,5 +42,5 @@ python3 bladerf_capture.py
 
 # 4. Full pipeline
 python3 run_pipeline.py
-python3 run_pipeline.py --save_dir debug_specs/ --no_infer  # STFT debug
+python3 run_pipeline.py --save_dir debug_specs/ --no_infer  # STFT debug_old
 ```

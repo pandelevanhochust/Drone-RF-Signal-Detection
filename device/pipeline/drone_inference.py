@@ -221,7 +221,7 @@ def get_args():
     p = argparse.ArgumentParser(
         description="drone_inference.py — standalone test (no BladeRF needed)"
     )
-    p.add_argument("--model",  default="../quantize_model/drone_pipeline_fused_quantized.tflite")
+    p.add_argument("--model",  default="../quantize_model/drone_fused.tflite")
     p.add_argument("--labels", default="../quantize_model/class_names.txt")
     p.add_argument("--cpu",    action="store_true",
                    help="Disable NPU delegate, run on CPU only")

@@ -206,7 +206,7 @@ def parse_args():
     )
     p.add_argument("--root",        required=True,                  help="Dataset root directory")
     p.add_argument("--out",         default="output_spectrograms",  help="Output root directory")
-    p.add_argument("--fs",          type=float, default=60e6,       help="Sample rate (Hz)")
+    p.add_argument("--fs",          type=float, default=25e6,       help="Sample rate (Hz)")
     p.add_argument("--nfft",        type=int,   default=1024,       help="FFT size")
     p.add_argument("--duration_ms", type=float, default=80.0,       help="Window length (ms)")
     p.add_argument("--workers",     type=int,   default=1,          help="Parallel worker processes")

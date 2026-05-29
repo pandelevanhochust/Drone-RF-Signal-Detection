@@ -138,10 +138,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Segment a single .dat IQ file into STFT PNG images.")
     p.add_argument("--file",        required=True,        help="Path to the .dat file")
     p.add_argument("--out",         default="output_images", help="Output directory")
-    p.add_argument("--fs",          type=float, default=60e6,      help="Sample rate (Hz)")
-    p.add_argument("--center_freq", type=float, default=2.4375e9,  help="Centre frequency (Hz)")
+    p.add_argument("--fs",          type=float, default=25e6,      help="Sample rate (Hz)")
+    p.add_argument("--center_freq", type=float, default=2.4e9,  help="Centre frequency (Hz)")
     p.add_argument("--nfft",        type=int,   default=1024,      help="FFT size")
-    p.add_argument("--duration_ms", type=float, default=5.0,      help="Segment length (ms)")
+    p.add_argument("--duration_ms", type=float, default=80.0,      help="Segment length (ms)")
     p.add_argument("--n_segments",  type=int,   default=None,      help="Fixed # of segments (default: random 2–3)")
     p.add_argument("--seed",        type=int,   default=None,      help="Random seed for reproducibility")
     return p.parse_args()
@@ -161,3 +161,4 @@ if __name__ == "__main__":
     )
 
 # C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe single_segmentation.py --file droneV2_data/MAV_1110_00.dat  --out  output_images/
+# D:/toanlv/Drone-RF-Signal-Detection/.venv/Scripts/python.exe stft_segmentation.py --root ~/NewCapture --out output_spectrograms/

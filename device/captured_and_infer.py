@@ -402,7 +402,7 @@ def get_args():
     p.add_argument("--cpu",      action="store_true",
                    help="Disable NPU delegate, run inference on CPU")
     p.add_argument("--save_dir", default=None,
-                   help="Save debug spectrogram PNGs to this folder")
+                   help="Save debug_old spectrogram PNGs to this folder")
     p.add_argument("--no_infer", action="store_true",
                    help="Capture and build spectrograms only, skip inference")
     p.add_argument("--queue_size", type=int, default=4,
