@@ -38,7 +38,6 @@ import os
 import time
 
 import numpy as np
-from ai_edge_litert.interpreter import Interpreter, load_delegate
 
 IMG_H, IMG_W        = 256, 512
 DELEGATE_LIB        = "libQnnTFLiteDelegate.so"
@@ -67,10 +66,22 @@ class DroneInferencer:
 
     def __init__(
         self,
-        model_path  : str = '../quantize_model/drone_classifier_quantized.tflite',
-        labels_path : str = "../quantize_model/class_names.txt",
-        use_npu     : bool = True,
+        model_path           : str,
+        labels_path          : str   = "class_names.txt",
+        use_npu              : bool  = True,
+        confidence_threshold : float = 0.70,
     ):
+        """
+        confidence_threshold : float, default 0.70
+            Minimum softmax probability for a drone detection to be reported.
+            If top-1 confidence < threshold, result["class"] is forced to
+            "NO_DRONE" and result["suppressed"] is True.
+            Tune this value based on your false positive / false negative
+            tradeoff:
+                0.90  — very conservative, few false positives
+                0.70  — balanced (recommended starting point)
+                0.50  — permissive, catches weak signals but noisier
+        """
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Model not found: {model_path}\n"
@@ -87,7 +98,8 @@ class DroneInferencer:
             self.class_names = CLASS_NAMES_DEFAULT
 
         # ── Build interpreter ─────────────────────────────────────────────────
-        self.interp = self.build_interpreter(model_path, use_npu)
+        self.confidence_threshold = confidence_threshold
+        self.interp = self._build_interpreter(model_path, use_npu)
 
         inp = self.interp.get_input_details()[0]
         out = self.interp.get_output_details()[0]
@@ -139,43 +151,49 @@ class DroneInferencer:
         logits = self._dequantise(raw)
         probs  = self._softmax(logits)[0]                 # (num_classes,)
 
-        pred_idx = int(np.argmax(probs))
+        pred_idx   = int(np.argmax(probs))
+        confidence = float(probs[pred_idx])
+        raw_class  = self.class_names[pred_idx]
+
+        # Confidence threshold — suppress low-confidence detections.
+        # If top-1 confidence is below this, report NO_DRONE regardless.
+        # Prevents DC offset / narrowband interference false positives.
+        # Tune: raise threshold to reduce false positives, lower to catch
+        # weaker signals.
+        if confidence < self.confidence_threshold:
+            pred_class = "NO_DRONE"
+        else:
+            pred_class = raw_class
+
         return {
-            "class"      : self.class_names[pred_idx],
-            "confidence" : float(probs[pred_idx]),
+            "class"      : pred_class,
+            "raw_class"  : raw_class,
+            "confidence" : confidence,
             "probs"      : probs,
             "latency_ms" : latency_ms,
+            "suppressed" : pred_class != raw_class,
         }
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def build_interpreter(model_path: str, use_npu: bool):
-        """
-        Load the LiteRT interpreter with or without the QNN NPU delegate.
-        """
+    def _build_interpreter(model_path: str, use_npu: bool):
+        from ai_edge_litert.interpreter import Interpreter, load_delegate
         delegates = []
         if use_npu:
             try:
-                # Explicitly point to the Hexagon Tensor Processor (HTP) core and skel libraries
-                delegate_options = {
-                    "backend_type": "htp",
-                    "library_path": "/usr/lib/libQnnHtp.so",
-                    "skel_library_dir": "/usr/lib/rfsa/adsp"
-                }
-
-                qnn = load_delegate(DELEGATE_LIB, options=delegate_options)
-                delegates = [qnn]
-                print(f"[Setup] QNN delegate loaded successfully (Backend: HTP / Hexagon NPU)")
+                delegates = [load_delegate(DELEGATE_LIB, {"backend_type": "htp"})]
+                print(f"[Inference] QNN delegate loaded  (HTP / Hexagon NPU)")
             except Exception as exc:
-                print(f"[Setup] WARNING: could not load QNN delegate: {exc}")
-                print(f"[Setup] Falling back to CPU-only inference.")
+                print(f"[Inference] WARNING: QNN delegate failed ({exc})")
+                print(f"[Inference] Falling back to CPU-only inference.")
+        else:
+            print(f"[Inference] CPU-only mode (--cpu flag set)")
 
-        interp = Interpreter(
-            model_path=model_path,
-            experimental_delegates=delegates)
+        interp = Interpreter(model_path=model_path, experimental_delegates=delegates)
         interp.allocate_tensors()
         return interp
+
     def _dequantise(self, raw: np.ndarray) -> np.ndarray:
         """
         Dequantise INT8 TFLite output to float32 logits.
@@ -204,7 +222,7 @@ def get_args():
         description="drone_inference.py — standalone test (no BladeRF needed)"
     )
     p.add_argument("--model",  default="../quantize_model/drone_pipeline_fused_quantized.tflite")
-    p.add_argument("--labels", default="class_names.txt")
+    p.add_argument("--labels", default="../quantize_model/class_names.txt")
     p.add_argument("--cpu",    action="store_true",
                    help="Disable NPU delegate, run on CPU only")
     p.add_argument("--runs",   type=int, default=10,
