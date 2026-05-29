@@ -8,8 +8,8 @@ import time
 def main():
     parser = argparse.ArgumentParser(description="USRP X300 High-Speed IQ Recorder")
     parser.add_argument("-f", "--freq", type=float, default=2375000000, help="Frequency in Hz")
-    parser.add_argument("-r", "--rate", type=float, default=50000000, help="Sample rate in Hz (50MHz)")
-    parser.add_argument("-g", "--gain", type=float, default=0.0, help="RX Gain")
+    parser.add_argument("-r", "--rate", type=float, default=25000000, help="Sample rate in Hz (50MHz)")
+    parser.add_argument("-g", "--gain", type=float, default=20.0, help="RX Gain")
     parser.add_argument("-n", "--nsamps", type=int, default=100000000, help="Total samples to record (2 seconds)")
     parser.add_argument("-o", "--output", type=str, required=True, help="Output file path")
     args = parser.parse_args()
