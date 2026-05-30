@@ -165,7 +165,7 @@ def get_transforms(augment: bool = False) -> transforms.Compose:
 def get_dataloaders(
     dataset_dir: str,
     batch_size: int = 32,
-    num_workers: int = 4,
+    num_workers: int = 0,
 ) -> Tuple[DataLoader, DataLoader, Dict[int, str]]:
     """
     Build train and validation DataLoaders from a pre-split directory.
@@ -478,10 +478,10 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------------
 
     # Root folder with two class sub-folders (DRONE/ and NO_DRONE/)
-    RAW_DATASET_DIR = "raw_dataset"
+    RAW_DATASET_DIR = "DATASET"
 
     # Where the 80/20 split will be written
-    SPLIT_DATASET_DIR = "dataset"
+    SPLIT_DATASET_DIR = "dataset1"
 
     # Training hyper-parameters
     NUM_EPOCHS    = 20
