@@ -161,4 +161,4 @@ if __name__ == "__main__":
     )
 
 # C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe single_segmentation.py --file droneV2_data/MAV_1110_00.dat  --out  output_images/
-# D:/toanlv/Drone-RF-Signal-Detection/.venv/Scripts/python.exe stft_segmentation.py --root ~/NewCapture --out output_spectrograms/
+# D:/toanlv/Drone-RF-Signal-Detection/.venv/Scripts/python.exe stft_segmentation.py --root ~/2375G_capture_dat --out output_spectrograms/
