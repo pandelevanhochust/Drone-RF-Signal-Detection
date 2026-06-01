@@ -322,55 +322,34 @@ def _extract_recording_id(filename: str) -> str:
 
     return stem
 
+
 def split_dataset(
-    src_dir    : str,
-    dest_dir   : str,
-    split_ratio: float = 0.2,
-    seed       : int   = 42,
+        src_dir: str,
+        dest_dir: str,
+        split_ratio: float = 0.2,
+        seed: int = 42,
 ) -> None:
     """
-    Recording-level train/val split — prevents data leakage.
-
-    WHY recording-level (not image-level)
-    --------------------------------------
-    Each IQ recording is sliced into multiple 80 ms spectrogram segments.
-    Consecutive segments from the same recording are near-identical (same
-    drone, same channel, same noise floor). An image-level split puts some
-    segments in train and others from the SAME recording in val — the model
-    memorises recording-specific noise artefacts rather than drone signal
-    structure, and achieves spuriously high val accuracy (100%) while
-    completely failing on new recordings.
-
-    The fix: group all segments by their parent recording ID, split the
-    GROUPS 80/20, then copy all segments of each group to the correct split.
-    No two segments from the same recording appear in both train and val.
-
-    File naming convention (segment_file.py output)
-    -------------------------------------------------
-        {recording_stem}__{seg_tag}.png
-    Example: MAV_1110_00__seg00_start720ms.png
-    Recording ID = 'MAV_1110_00'  (everything before __)
-
-    Parameters
-    ----------
-    src_dir     : Root with DRONE/ and NO_DRONE/ sub-directories of PNGs.
-    dest_dir    : Output root; created if absent.
-    split_ratio : Fraction of recordings reserved for validation (0.20).
-    seed        : Random seed for reproducible splits.
+    Performs recording-level stratified grouping. Sorts recordings by size
+    and distributes them dynamically to keep both class balance and the
+    overall 80/20 frame ratio intact.
     """
-    src  = Path(src_dir)
+    import random
+    from collections import defaultdict
+
+    src = Path(src_dir)
     dest = Path(dest_dir)
 
     if dest.exists():
-        log.info("'%s' already exists — skipping split.", dest)
+        log.info("'%s' already exists — skipping split initialization.", dest)
         return
 
     class_dirs = sorted([d for d in src.iterdir() if d.is_dir()])
     if not class_dirs:
         raise ValueError(f"No sub-directories found in '{src_dir}'.")
 
-    log.info("Classes: %s", [d.name for d in class_dirs])
-    log.info("Split strategy: RECORDING-LEVEL (prevents data leakage)")
+    random.seed(seed)
+    log.info("Executing Stratified Group Split Matrix...")
 
     for cls_dir in class_dirs:
         images = sorted([
@@ -378,57 +357,59 @@ def split_dataset(
             if f.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
         ])
         if not images:
-            log.warning("Class '%s' has no images — skipping.", cls_dir.name)
             continue
 
-        # Group segments by recording ID
-        from collections import defaultdict
-        recording_groups: dict = defaultdict(list)
+        # 1. Group files by parent recording key
+        recording_groups = defaultdict(list)
         for img_path in images:
             rec_id = _extract_recording_id(img_path.name)
             recording_groups[rec_id].append(img_path)
 
-        n_recordings = len(recording_groups)
-        recording_ids = sorted(recording_groups.keys())
+        # 2. Sort recordings by total frame volume (largest first)
+        # This allows us to distribute heavy recordings evenly between train and val
+        sorted_recs = sorted(
+            recording_groups.items(),
+            key=lambda item: len(item[1]),
+            reverse=True
+        )
 
-        log.info("  %-12s : %d images from %d recordings",
-                 cls_dir.name, len(images), n_recordings)
-
-        if n_recordings < 2:
-            log.warning(
-                "  %-12s : only %d recording — cannot split. "
-                "All images go to train. Add more recordings.",
-                cls_dir.name, n_recordings
-            )
-            train_recs, val_recs = recording_ids, []
-        else:
-            train_recs, val_recs = train_test_split(
-                recording_ids,
-                test_size    = split_ratio,
-                random_state = seed,
-                shuffle      = True,
-            )
-
+        train_recs, val_recs = [], []
         train_count, val_count = 0, 0
-        for split, recs in [("train", train_recs), ("val", val_recs)]:
-            out_dir = dest / split / cls_dir.name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for rec_id in recs:
-                for img_path in recording_groups[rec_id]:
-                    shutil.copy2(img_path, out_dir / img_path.name)
-                    if split == "train":
-                        train_count += 1
-                    else:
-                        val_count += 1
+        target_val_fraction = split_ratio
 
-        log.info("  %-12s → train: %d imgs (%d recs) | val: %d imgs (%d recs)",
-                 cls_dir.name,
-                 train_count, len(train_recs),
-                 val_count,   len(val_recs))
-        log.info("  Train recordings: %s", train_recs[:5])
-        log.info("  Val   recordings: %s", val_recs[:5])
+        # 3. Dynamic Knapsack / Greedy allocation
+        for rec_id, frame_list in sorted_recs:
+            rec_size = len(frame_list)
+            total_current = train_count + val_count
 
-    log.info("Recording-level split complete → '%s'", dest)
+            # Decide where to place the recording block to keep the image ratio closest to 80/20
+            if total_current == 0:
+                # Put the single largest recording into training to establish baseline floor
+                train_recs.append((rec_id, frame_list))
+                train_count += rec_size
+            else:
+                current_val_ratio = val_count / total_current
+                if current_val_ratio < target_val_fraction:
+                    val_recs.append((rec_id, frame_list))
+                    val_count += rec_size
+                else:
+                    train_recs.append((rec_id, frame_list))
+                    train_count += rec_size
+
+        # 4. Copy files to disk target slots
+        for split, rec_list in [("train", train_recs), ("val", val_recs)]:
+            split_class_dir = dest / split / cls_dir.name
+            split_class_dir.mkdir(parents=True, exist_ok=True)
+
+            for rec_id, frame_list in rec_list:
+                for img_path in frame_list:
+                    shutil.copy2(img_path, split_class_dir / img_path.name)
+
+        log.info("  %-12s → train: %d imgs (%d recs) | val: %d imgs (%d recs) | actual_val=%.1f%%",
+                 cls_dir.name, train_count, len(train_recs), val_count, len(val_recs),
+                 (val_count / (train_count + val_count)) * 100)
+
+    log.info("Stratified recording-level split complete → '%s'", dest)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
