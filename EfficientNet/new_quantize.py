@@ -165,7 +165,8 @@ def run_qai_hub_pipeline(
     print(f"  ✓ Compilation complete. NPU-fused operators generated.")
 
     # ── Step 4: Download ──────────────────────────────────────────────────────
-    tflite_path = os.path.join(out_dir, "efficientvit_l2_drone_quantized.tflite")
+    onnx_stem = Path(onnx_path).stem
+    tflite_path = os.path.join(out_dir, f"{onnx_stem}_quantized.tflite")
     print(f"\n[Hub 4/5] Downloading finalized .tflite deployment asset...")
     compiled_model.download(tflite_path)
     file_mb = Path(tflite_path).stat().st_size / (1024 * 1024)
