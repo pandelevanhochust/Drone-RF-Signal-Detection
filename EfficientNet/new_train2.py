@@ -288,31 +288,39 @@ class DroneClassifier(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Dataset auto-split
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _extract_recording_id(filename: str) -> str:
     """
-    Extract the recording stem from a spectrogram filename so that all
-    segments from the same IQ recording stay in the same split.
+    Unified extraction parser matching both DRONE and NO_DRONE filename prefixes.
+    Ensures timeline frames remain locked together to prevent data leakage.
 
-    Naming conventions supported:
-        seg_file_seg00_start0ms.png     → 'seg_file'
-        recording__seg00_start0ms.png   → 'recording'
-        MAV_1110_00__seg00_start0ms.png → 'MAV_1110_00'
-        any_name.png                    → 'any_name'   (fallback)
-
-    The double-underscore separator (__) matches the segment_file.py
-    output format: {stem}__{tag}.png
+    Parsed mappings:
+        100m_105.png                    → '100m'
+        below_signal_224.png            → 'below_signal'
+        downstream_138.png              → 'downstream'
+        frame_000341.png                → 'frame'
+        debug1_22.png                   → 'debug1'
+        nodrone_42.png                  → 'nodrone'
+        no_drone_45.png                 → 'no_drone'
+        signal_122.png                  → 'signal'
+        noisesss_1826.png               → 'noisesss'
+        drone__seg0011_start770ms.png   → 'drone'
+        noise__seg0001_start70.0ms.png  → 'noise'
+        24G__seg0000_start0.0ms.png     → '24G'
     """
-    stem = Path(filename).stem               # drop extension
-    # Split on double underscore — everything before it is the recording ID
+    stem = Path(filename).stem
+
+    # 1. Isolate double underscore layouts (24G__, drone__, noise__)
     if "__" in stem:
         return stem.split("__")[0]
-    # Fallback: strip trailing _segXX or _startXXXms tokens
-    import re
-    recording = re.sub(r"_seg\d+.*$", "", stem)
-    recording = re.sub(r"_start\d+ms.*$", "", recording)
-    return recording if recording else stem
 
+    # 2. Isolate single underscore index structures (100m_X, noisesss_X, below_signal_X)
+    if "_" in stem:
+        parts = stem.split("_")
+        # If trailing index token is numeric, drop it to extract the string root
+        if parts[-1].isdigit():
+            return "_".join(parts[:-1])
+
+    return stem
 
 def split_dataset(
     src_dir    : str,
