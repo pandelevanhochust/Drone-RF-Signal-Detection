@@ -173,7 +173,7 @@ def get_args():
                    help="Path to class_names.txt")
     p.add_argument("--addr",       default="192.168.10.2",
                    help="USRP X300 IP address (default: 192.168.10.2)")
-    p.add_argument("--gain",       type=float, default=30.0,
+    p.add_argument("--gain",       type=float, default=35.0,
                    help="USRP RX gain in dB, range 0-31.5 (default: 30.0)")
     p.add_argument("--cpu",        action="store_true",
                    help="Disable NPU delegate, run inference on CPU only")

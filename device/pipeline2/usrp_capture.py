@@ -60,7 +60,7 @@ import numpy as np
 
 # Must match training script default --fs
 # X300: 200 MHz / 8 = 25 MHz, decimation=8 → 3 halfband filters, flat passband
-CENTER_FREQ_HZ  = 2_450_000_000     # 2.4 GHz  (matches training --center_freq 2.4e9)
+CENTER_FREQ_HZ  = 2_440_000_000     # 2.4 GHz  (matches training --center_freq 2.4e9)
 SAMPLE_RATE_HZ  = 25_000_000        # 25 MHz   (matches training --fs 25e6)
 BANDWIDTH_HZ    = 30_000_000        # 25 MHz   (set equal to sample rate)
 FRAME_DURATION  = 0.080             # 80 ms    (matches training --duration_ms 80)

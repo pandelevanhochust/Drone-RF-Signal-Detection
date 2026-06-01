@@ -3,7 +3,7 @@ train_and_export.py
 ====================
 Binary spectrogram classifier: DRONE vs NO_DRONE
 Architecture : efficientvit_l2  (MIT Han Lab via timm)
-Target export: ONNX opset-17  →  Qualcomm AI Hub (static [1,3,224,224])
+Target export: ONNX opset-17  →  Qualcomm AI Hub (static [1,3,256,512])
 
 Dependencies
 ------------
@@ -119,26 +119,49 @@ def split_dataset(
 # ===========================================================================
 
 def get_transforms(augment: bool = False) -> transforms.Compose:
+    """
+    Build torchvision transform pipeline.
+
+    Design notes (spectrogram-aware):
+    - Force RGB conversion — raw captures may be RGBA from matplotlib; safe drop.
+    - Resize to exactly 256×512 (H×W) matching raw spectrogram aspect ratio.
+    - ToTensor() maps uint8 [0, 255]  →  float32 [0.0, 1.0]. No clipping.
+    - NO vertical flip  — frequency axis must stay upright.
+    - NO rotation       — frequency/time structure is orientation-sensitive.
+    - Light horizontal flip only during training (time-mirror is safe for
+      DRONE detection since RF stripe patterns are temporally symmetric).
+    - Mild colour jitter raises generalisation without distorting energy scale.
+
+    Parameters
+    ----------
+    augment : Apply training-time augmentation when True.
+
+    Returns
+    -------
+    torchvision.transforms.Compose
+    """
+    # Native spectrogram resolution: H=256, W=512
+    INPUT_H, INPUT_W = 256, 512
+
     base = [
-        transforms.Lambda(lambda img: img.convert("RGB")),  # ← ADD THIS LINE
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
+        transforms.Lambda(lambda img: img.convert("RGB")),  # RGBA → RGB safety
+        transforms.Resize((INPUT_H, INPUT_W)),              # H=256, W=512
+        transforms.ToTensor(),                              # → [0.0, 1.0] float32
     ]
 
     if augment:
-        augmentation = [
-            transforms.Lambda(lambda img: img.convert("RGB")),  # ← ADD HERE TOO
-            transforms.Resize((224, 224)),
+        pipeline = [
+            transforms.Lambda(lambda img: img.convert("RGB")),
+            transforms.Resize((INPUT_H, INPUT_W)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(
                 brightness=0.10,
                 contrast=0.10,
                 saturation=0.05,
-                hue=0.0,
+                hue=0.0,          # hue shift meaningless on false-colour spectrograms
             ),
             transforms.ToTensor(),
         ]
-        pipeline = augmentation
     else:
         pipeline = base
 
@@ -221,9 +244,10 @@ def build_model(num_classes: int = 2, pretrained: bool = True) -> nn.Module:
         "efficientvit_l2",
         pretrained=pretrained,
         num_classes=num_classes,
+        img_size=(256, 512),    # H=256, W=512 — matches raw spectrogram resolution
     )
     log.info(
-        "Built efficientvit_l2 — output head: %d logits | pretrained: %s",
+        "Built efficientvit_l2 — input: [1,3,256,512] | output head: %d logits | pretrained: %s",
         num_classes,
         pretrained,
     )
@@ -384,7 +408,7 @@ def export_to_onnx(
     """
     Export the trained model to ONNX with static dimensions for Qualcomm AI Hub.
 
-    Input  tensor name : 'image_tensor'   shape [1, 3, 224, 224]  float32
+    Input  tensor name : 'image_tensor'   shape [1, 3, 256, 512]  float32
     Output tensor name : 'class_logits'   shape [1, 2]             float32
 
     Dynamic axes are intentionally disabled: Qualcomm AI Hub compilation
@@ -400,10 +424,10 @@ def export_to_onnx(
     model.cpu()
 
     # Dummy input matching the exact deployment shape
-    dummy_input = torch.zeros(1, 3, 224, 224, dtype=torch.float32)
+    dummy_input = torch.zeros(1, 3, 256, 512, dtype=torch.float32)
 
     log.info("Exporting model to ONNX …")
-    log.info("  Input  : image_tensor  [1, 3, 224, 224]  float32")
+    log.info("  Input  : image_tensor  [1, 3, 256, 512]  float32")
     log.info("  Output : class_logits  [1, 2]             float32")
     log.info("  Opset  : %d", opset_version)
 
