@@ -461,7 +461,7 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------------
 
     # Root folder with two class sub-folders (DRONE/ and NO_DRONE/)
-    RAW_DATASET_DIR = "raw_dataset"
+    RAW_DATASET_DIR = "DATASET"
 
     # Where the 80/20 split will be written
     SPLIT_DATASET_DIR = "dataset"
