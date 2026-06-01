@@ -79,7 +79,7 @@ IMAGENET_MEAN  = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD   = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 # Viridis colormap LUT — matches training cmap='viridis'
-_JET_LUT = (
+_VIRIDIS_LUT = (
     matplotlib.colormaps["viridis"](np.linspace(0, 1, 256))[:, :3] * 255
 ).astype(np.uint8)                  # (256, 3) uint8 RGB
 
@@ -216,12 +216,13 @@ def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     )                                               # (256, 512) uint8
 
     # ── Step 6: apply viridis colormap (matches training cmap='viridis') ──────
-    rgb = _JET_LUT[small]                           # (256, 512, 3) uint8
+    rgb = _VIRIDIS_LUT[small]                           # (256, 512, 3) uint8
 
     # ── Step 7: Normalise → NCHW float32 ────────────────────────────────────
     # Training uses only ToTensor() = /255.0. No ImageNet mean/std.
     # (train_and_export.py get_transforms: Resize → ToTensor only)
     arr = rgb.astype(np.float32) / 255.0            # HWC [0.0, 1.0]
+    arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
     return arr.transpose(2, 0, 1)[np.newaxis].astype(np.float32)  # (1,3,H,W)
 
 

@@ -17,7 +17,7 @@ live STFT spectrogram is pixel-identical to the training spectrograms.
 X300 master clock = 200 MHz. Valid sample rates = 200 MHz / N:
     200 / 8  =  25.0 MHz  ← matches training exactly, decimation=8 (3 halfbands)
     200 / 4  =  50.0 MHz
-    200 / 5  =  40.0 MHz
+    200 / 5  =  10.0 MHz
 
 25 MHz with decimation=8 enables 3 halfband filters → flattest passband,
 best alias rejection. Wire rate = 25M × 8 bytes = 200 MB/s — very safe
@@ -34,8 +34,8 @@ No manual interleaving or /2048 conversion needed.
 
 Connection
 ----------
-    X300 via 10 GbE: default IP 192.168.40.2
-    Verify: uhd_find_devices --args="addr=192.168.40.2"
+    X300 via 10 GbE: default IP 192.168.10.2
+    Verify: uhd_find_devices --args="addr=192.168.10.2"
 
 Setup (run once)
 ----------------
@@ -45,7 +45,7 @@ Setup (run once)
 
 Standalone test
 ---------------
-    python3 usrp_capture.py --addr 192.168.40.2 --gain 30
+    python3 usrp_capture.py --addr 192.168.10.2 --gain 30
 """
 
 import queue

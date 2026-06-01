@@ -193,7 +193,7 @@ class DroneInferencer:
 
 def get_args():
     p = argparse.ArgumentParser(description="DroneInferencer standalone test")
-    p.add_argument("--model", default="../quantize_model/model2.tflite",
+    p.add_argument("--model", default="../quantize_model/model3.tflite",
                    help="Path to .tflite model")
     p.add_argument("--labels",    default="class_names.txt")
     p.add_argument("--cpu",       action="store_true",

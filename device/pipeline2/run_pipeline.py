@@ -167,12 +167,12 @@ def get_args():
     p = argparse.ArgumentParser(
         description="BladeRF → STFT → Drone detection (RB3 Gen 2 NPU)"
     )
-    p.add_argument("--model",      default="../quantize_model/model2.tflit",
+    p.add_argument("--model",      default="../quantize_model/model3.tflite",
                    help="Path to fused quantized TFLite model")
     p.add_argument("--labels",     default="class_names.txt",
                    help="Path to class_names.txt")
-    p.add_argument("--addr",       default="192.168.40.2",
-                   help="USRP X300 IP address (default: 192.168.40.2)")
+    p.add_argument("--addr",       default="192.168.10.2",
+                   help="USRP X300 IP address (default: 192.168.10.2)")
     p.add_argument("--gain",       type=float, default=30.0,
                    help="USRP RX gain in dB, range 0-31.5 (default: 30.0)")
     p.add_argument("--cpu",        action="store_true",
@@ -263,9 +263,9 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        import bladerf  # noqa: F401
-    except ImportError:
-        print("ERROR: bladerf not installed.\n  pip3 install bladerf")
-        sys.exit(1)
+    # try:
+    #     import bladerf  # noqa: F401
+    # except ImportError:
+    #     print("ERROR: bladerf not installed.\n  pip3 install bladerf")
+    #     sys.exit(1)
     main()
