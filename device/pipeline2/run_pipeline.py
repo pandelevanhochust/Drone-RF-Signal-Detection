@@ -167,7 +167,7 @@ def get_args():
     p = argparse.ArgumentParser(
         description="BladeRF → STFT → Drone detection (RB3 Gen 2 NPU)"
     )
-    p.add_argument("--model",      default="../quantize_model/model3.tflite",
+    p.add_argument("--model",      default="../quantize_model/temp2.tflite",
                    help="Path to fused quantized TFLite model")
     p.add_argument("--labels",     default="class_names.txt",
                    help="Path to class_names.txt")
