@@ -27,6 +27,20 @@ Body schema
         "controlState" : null
     }
 
+
+
+    {
+    "deviceId": 1001,
+    "timestamp": "2026-06-01T12:00:00Z",
+    "status": "Online",
+    "detected": 1,
+    "droneType": "Detected",
+    "accuracy": 0.98,
+    "controlState": "Approaching",
+    "latency": 12.4
+    }
+
+
 .env file
 ---------
     API_URL=http://localhost:8082
