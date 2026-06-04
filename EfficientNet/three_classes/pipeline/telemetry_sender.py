@@ -62,15 +62,16 @@ DRONE_TYPE_MAP = {
 def build_payload(result: dict, device_id: int) -> dict:
     """
     Convert a DroneInferencer result dict into the API body schema.
-
-    Refactored Logic:
-    -----------------
-    Always rounds and includes the exact model 'confidence' value into the
-    'accuracy' payload field, even when detected is False.
     """
     pred_class = result["class"]
     is_drone   = pred_class != "NO_DRONE"
     timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    freq_hz    = result.get("freq_hz")
+    if freq_hz is not None:
+        freq_ghz = round(float(freq_hz / 1e9), 3)
+    else:
+        freq_ghz = 2.400  
 
     return {
         "deviceId"     : device_id,
@@ -78,10 +79,10 @@ def build_payload(result: dict, device_id: int) -> dict:
         "status"       : "Online",
         "detected"     : 1 if is_drone else 0,
         "droneType"    : DRONE_TYPE_MAP.get(pred_class, "None"),
-        # Fixed: Always map the exact float value from your NPU prediction
         "accuracy"     : round(float(result.get("confidence", 0.0)), 4),
         "controlState" : result.get("controlState", "None" if not is_drone else "Active"),
-        "latency"      : round(float(result.get("latency_ms", 12.5)), 1)
+        "latency"      : round(float(result.get("latency_ms", 12.5)), 1),
+        "frequency"    : freq_ghz
     }
 
 
