@@ -3,6 +3,13 @@ test_telemetry.py
 =============================================================================
 Standalone infinite loop script to continuously test your Telemetry API connection.
 Runs indefinitely, sending randomized mock 3-class data payloads until Ctrl+C.
+
+Refactored Updates:
+-------------------
+  - Accuracy field now reflects true background classification confidence
+    when a drone is NOT detected instead of wiping it to 0.0.
+  - Dynamically assigns valid drone strings ("DJI Mavic 3", "RF Transmission", "None")
+    and explicit control states matching server ingestion rules.
 """
 
 import json
@@ -38,38 +45,25 @@ def _load_env(env_path: str = ".env") -> dict:
 MAX_RETRIES     = 3
 RETRY_BASE_S    = 1.0
 QUEUE_MAXSIZE   = 64
-REQUEST_TIMEOUT = 5
-
-DRONE_TYPE_MAP = {
-    "DRONE"        : "Detected",
-    "DRONE_SIGNAL" : "DroneSignal",
-    "NO_DRONE"     : "None",
-}
+REQUEST_TIMEOUT = 2  # Lowered to match production specs and avoid thread blockages
 
 
 def build_payload(result: dict, device_id: int) -> dict:
     """
     Convert a DroneInferencer result dict into the strict API body schema.
 
-    Expected Server Format:
-    {
-      "deviceId": 1001,
-      "timestamp": "2026-06-03T02:17:14Z",
-      "status": "Online",
-      "detected": 1,
-      "droneType": "DJI Mavic 3" | "None",
-      "accuracy": 0.98,
-      "controlState": "Active" | "None",
-      "latency": 12.5
-    }
+    Refactored Logic:
+    -----------------
+    Always maps the explicit model confidence rating directly to the accuracy field,
+    guaranteeing true metadata tracking even under negative classifications.
     """
     pred_class = result["class"]
     is_drone = pred_class != "NO_DRONE"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Dynamic Drone Type Assignment to prevent server validation drops
+    # Map classifications to production lookup targets expected by the microservice
     if pred_class == "DRONE":
-        drone_type = "DRONE"  # Or use result.get("drone_model", "Unknown Drone")
+        drone_type = "DJI Mavic 3"
     elif pred_class == "DRONE_SIGNAL":
         drone_type = "RF Transmission"
     else:
@@ -81,9 +75,10 @@ def build_payload(result: dict, device_id: int) -> dict:
         "status": "Online",
         "detected": 1 if is_drone else 0,
         "droneType": drone_type,
-        "accuracy": round(float(result["confidence"]), 2) if is_drone else 0.0,
+        # Refactored: Preserves raw floating-point accuracy scores across all states
+        "accuracy": round(float(result["confidence"]), 4),
         "controlState": "Active" if is_drone else "None",
-        "latency": round(float(result.get("latency_ms", 12.5)), 1)  # Maps to server latency expectations
+        "latency": round(float(result.get("latency_ms", 12.5)), 1)
     }
 
 
@@ -92,32 +87,21 @@ def _post(url: str, api_key: str, payload: dict) -> tuple:
     Executes a secure HTTP POST request against the remote telemetry gateway.
     Injects required cryptographic API access tokens and masks runtime fingerprints.
     """
-    # Convert JSON payload dictionary to raw UTF-8 bytes
     body = json.dumps(payload, default=str).encode("utf-8")
-
-    # Absolute strict header configuration matching server security specs
     headers = {
         "Content-Type": "application/json",
         "X-Device-API-Key": str(api_key).strip(),
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Edge/104.0.101"  # Overrides Python signature
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Edge/104.0.101"
     }
 
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            # Code 200/201 Success path
             return True, resp.status, resp.read().decode()
-
     except urllib.error.HTTPError as exc:
-        # Handles server-side rejections (e.g., 401 Unauthorized Key, 400 Bad Payload)
         return False, exc.code, exc.read().decode()
-
-    except urllib.error.URLError as exc:
-        # Handles lower-level infrastructure routing drops (e.g., wrong IP port, DNS timeout)
-        return False, 0, f"Network unreachable: {exc.reason}"
-
     except Exception as exc:
-        return False, 0, f"Unexpected pipeline anomaly: {str(exc)}"
+        return False, 0, str(exc)
 
 
 def _post_with_retry(url: str, api_key: str, payload: dict) -> bool:
@@ -126,7 +110,7 @@ def _post_with_retry(url: str, api_key: str, payload: dict) -> bool:
         if ok:
             return True
         wait = RETRY_BASE_S * (2 ** (attempt - 1))
-        print(f"[Telemetry] POST failed attempt={attempt}/{MAX_RETRIES} status={code}")
+        print(f"[Telemetry] POST failed attempt={attempt}/{MAX_RETRIES} status={code} body={body[:100]}")
         if attempt < MAX_RETRIES:
             time.sleep(wait)
     return False
@@ -158,6 +142,7 @@ class TelemetrySender:
         if self._queue.full():
             try:
                 self._queue.get_nowait()
+                print("[Telemetry] WARNING: Simulation buffer full — dropping stale message thread context.")
             except queue.Empty:
                 pass
         self._queue.put_nowait(payload)
@@ -177,10 +162,11 @@ class TelemetrySender:
             ok = _post_with_retry(self._endpoint, self.api_key, payload)
             if ok:
                 self._sent += 1
-                label = f"{payload['droneType']} {payload['accuracy']*100:.1f}%" if payload["detected"] else "NO_DRONE"
+                label = f"{payload['droneType']} ({payload['accuracy']*100:.1f}%)" if payload["detected"] else f"NO_DRONE ({payload['accuracy']*100:.1f}%)"
                 print(f"[Telemetry] ✓ Sent packet: {label}")
             else:
                 self._failed += 1
+            self._queue.task_done()
 
 
 # ===========================================================================
@@ -194,7 +180,7 @@ if __name__ == "__main__":
 
     # 1. Enforce a backup structural configuration path if missing
     if not os.path.exists(".env"):
-        Path(".env").write_text("API_URL=http://localhost:8082\nAPI_KEY=YOUR_KEY\nDEVICE_ID=101\n")
+        Path(".env").write_text("API_URL=http://localhost:80\nAPI_KEY=YOUR_KEY\nDEVICE_ID=1001\n")
 
     try:
         sender = TelemetrySender(env_path=".env")
@@ -219,16 +205,10 @@ if __name__ == "__main__":
                 "latency_ms": random.uniform(10.0, 25.0)
             }
 
-            # Optional extra parameters from your updated server schema spec block
-            if choice == "DRONE":
-                mock_result["controlState"] = random.choice(["Approaching", "Hovering", "Tracking"])
-            else:
-                mock_result["controlState"] = None
-
             print(f"[Packet {loop_idx:04d}] Enqueuing random mock telemetry layout: {choice}")
             sender.send(mock_result)
 
-            # 3. Time separation gap delay (change 2.0 to make it faster or slower)
+            # 3. Time separation gap delay (2-second baseline)
             time.sleep(2.0)
             loop_idx += 1
 
