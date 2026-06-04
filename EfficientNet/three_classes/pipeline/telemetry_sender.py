@@ -45,7 +45,7 @@ def _load_env(env_path: str = ".env") -> dict:
 MAX_RETRIES     = 3
 RETRY_BASE_S    = 1.0
 QUEUE_MAXSIZE   = 64
-REQUEST_TIMEOUT = 5
+REQUEST_TIMEOUT = 1
 
 # 3-class → droneType string mapping
 DRONE_TYPE_MAP = {
