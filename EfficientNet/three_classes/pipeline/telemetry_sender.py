@@ -1,51 +1,12 @@
 """
 telemetry_sender.py
-===================
+=============================================================================
 Sends drone detection results to the telemetry API via HTTP POST.
 
-3-class update
---------------
-    DRONE        → detected=1, droneType="Detected",       accuracy=<conf>
-    DRONE_SIGNAL → detected=1, droneType="DroneSignal",    accuracy=<conf>
-    NO_DRONE     → detected=0, droneType="None",           accuracy=0.0
-
-Endpoint
---------
-    POST {API_URL}/api/v1/telemetry/log
-    Header: Content-Type: application/json
-    Header: X-Device-API-Key: {API_KEY}
-
-Body schema
------------
-    {
-        "deviceId"     : 101,
-        "timestamp"    : "2026-05-21T12:00:00.000Z",
-        "status"       : "Online",
-        "detected"     : 1,
-        "droneType"    : "Detected" | "DroneSignal" | "None",
-        "accuracy"     : 0.94 | 0.0,
-        "controlState" : null
-    }
-
-
-
-    {
-    "deviceId": 1001,
-    "timestamp": "2026-06-01T12:00:00Z",
-    "status": "Online",
-    "detected": 1,
-    "droneType": "Detected",
-    "accuracy": 0.98,
-    "controlState": "Approaching",
-    "latency": 12.4
-    }
-
-
-.env file
----------
-    API_URL=http://localhost:8082
-    API_KEY=YOUR_RAW_API_KEY_HERE
-    DEVICE_ID=101
+Refactored Updates
+------------------
+    - Accuracy payload field now passes the exact raw model confidence score
+      for NO_DRONE instead of wiping it to 0.0.
 """
 
 import json
@@ -84,10 +45,9 @@ def _load_env(env_path: str = ".env") -> dict:
 MAX_RETRIES     = 3
 RETRY_BASE_S    = 1.0
 QUEUE_MAXSIZE   = 64
-REQUEST_TIMEOUT = 5
+REQUEST_TIMEOUT = 1
 
 # 3-class → droneType string mapping
-# "None" and 0.0 used for NO_DRONE (server rejects JSON null)
 DRONE_TYPE_MAP = {
     "DRONE"        : "Detected",
     "DRONE_SIGNAL" : "DroneSignal",
@@ -102,21 +62,16 @@ DRONE_TYPE_MAP = {
 def build_payload(result: dict, device_id: int) -> dict:
     """
     Convert a DroneInferencer result dict into the API body schema.
-
-    Parameters
-    ----------
-    result    : dict from DroneInferencer.run()
-    device_id : int from .env DEVICE_ID
-
-    Class → payload mapping
-    -----------------------
-    DRONE        → detected=1, droneType="Detected",    accuracy=<conf>
-    DRONE_SIGNAL → detected=1, droneType="DroneSignal", accuracy=<conf>
-    NO_DRONE     → detected=0, droneType="None",        accuracy=0.0
     """
     pred_class = result["class"]
-    is_drone   = result.get("is_drone", pred_class != "NO_DRONE")
-    timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    is_drone   = pred_class != "NO_DRONE"
+    timestamp  = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    freq_hz    = result.get("freq_hz")
+    if freq_hz is not None:
+        freq_ghz = round(float(freq_hz / 1e9), 3)
+    else:
+        freq_ghz = 2.400  
 
     return {
         "deviceId"     : device_id,
@@ -124,8 +79,10 @@ def build_payload(result: dict, device_id: int) -> dict:
         "status"       : "Online",
         "detected"     : 1 if is_drone else 0,
         "droneType"    : DRONE_TYPE_MAP.get(pred_class, "None"),
-        "accuracy"     : round(float(result["confidence"]), 4) if is_drone else 0.0,
-        "controlState" : None,
+        "accuracy"     : round(float(result.get("confidence", 0.0)), 4),
+        "controlState" : result.get("controlState", "None" if not is_drone else "Active"),
+        "latency"      : round(float(result.get("latency_ms", 12.5)), 1),
+        "frequency"    : freq_ghz
     }
 
 
@@ -138,6 +95,7 @@ def _post(url: str, api_key: str, payload: dict) -> tuple:
     headers = {
         "Content-Type"     : "application/json",
         "X-Device-API-Key" : api_key,
+        "User-Agent"       : "Mozilla/5.0 (X11; Linux x86_64) Edge/104.0.101"
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -239,7 +197,7 @@ class TelemetrySender:
             if ok:
                 self._sent += 1
                 label = f"{payload['droneType']} {payload['accuracy']*100:.1f}%" \
-                        if payload["detected"] else "NO_DRONE"
+                        if payload["detected"] else f"NO_DRONE ({payload['accuracy']*100:.1f}%)"
                 print(f"[Telemetry] ✓  ts={payload['timestamp']}  "
                       f"detected={payload['detected']}  {label}")
             else:
