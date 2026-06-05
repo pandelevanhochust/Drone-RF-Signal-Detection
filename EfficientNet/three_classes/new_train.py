@@ -489,7 +489,7 @@ def export_to_onnx(model: nn.Module, output_path: str = "drone_classifier_b0.onn
 
 if __name__ == "__main__":
     # ── Path Routing Configurations ────────────────────────────────────────
-    RAW_DATASET_DIR   = "NEW_DATASET"
+    RAW_DATASET_DIR   = "UPDATED_DATASET"
     SPLIT_DATASET_DIR = "dataset_split"
 
     # ── Hardware & Size Dimensions ──────────────────────────────────────────
