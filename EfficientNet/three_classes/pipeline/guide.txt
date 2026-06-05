@@ -1,0 +1,30 @@
+$body = @{
+    email = "toanlv@gmail.com"
+    password = "admin123"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri "http://192.168.5.75:80/api/v1/auth/login" -ContentType "application/json" -Body $body
+
+
+$i = 1; Get-ChildItem -Filter *.png | Sort-Object Name | ForEach-Object { Rename-Item $_ -NewName ("100m_{0}.png" -f $i++) }
+
+
+{
+    "deviceId": 101,
+    "timestamp": "2026-06-02T13:36:11.000Z",
+    "status": "Online",
+    "detected": 1,
+    "droneType": "Detected",
+    "accuracy": 0.9993,
+    "controlState": null
+}
+
+{
+    "deviceId": 101,
+    "timestamp": "2026-06-02T13:36:11.000Z",
+    "status": "Online",
+    "detected": 1,
+    "droneType": "DroneSignal",
+    "accuracy": 0.8741,
+    "controlState": null
+}
