@@ -17,7 +17,7 @@ def main():
     print(f"Connecting to USRP X300...")
     try:
         # Pass the explicit library path hint if needed, otherwise connect directly via IP
-        usrp = uhd.usrp.MultiUSRP("addr=192.168.10.2")
+        usrp = uhd.usrp.MultiUSRP("addr=192.168.5.111")
     except Exception as e:
         print(f"Connection failed: {e}")
         sys.exit(1)

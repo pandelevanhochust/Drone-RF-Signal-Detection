@@ -42,7 +42,7 @@ Usage
         --duration_ms 80 \\
         --passes 5 \\
         --gain 30 \\
-        --addr 192.168.10.2 \\
+        --addr 192.168.5.111 \\
         -o captures/
 
     # Read back a saved segment with numpy
@@ -338,8 +338,8 @@ def main():
     p = argparse.ArgumentParser(
         description="USRP X300 sweeping IQ recorder (25 MHz hops)"
     )
-    p.add_argument("--addr",        default="192.168.10.2",
-                   help="USRP X300 IP address (default: 192.168.10.2)")
+    p.add_argument("--addr",        default="192.168.5.111",
+                   help="USRP X300 IP address (default: 192.168.5.111)")
     p.add_argument("--start_freq",  type=float, default=2.440e9,
                    help="Sweep start centre frequency in Hz (default: 2.44 GHz)")
     p.add_argument("--stop_freq",   type=float, default=2.460e9,

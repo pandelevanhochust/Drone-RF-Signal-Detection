@@ -36,7 +36,7 @@ Threading model
 
 Standalone test
 ---------------
-    python3 usrp_capture.py --addr 192.168.10.2 --gain 30
+    python3 usrp_capture.py --addr 192.168.5.111 --gain 30
 """
 
 import queue
@@ -85,7 +85,7 @@ RETUNE_SETTLE_S = 0.050
 #  Device open / close
 # ─────────────────────────────────────────────────────────────────────────────
 
-def open_usrp(addr: str = "192.168.10.2", gain: float = DEFAULT_GAIN_DB):
+def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
     """
     Open and configure USRP X300 for continuous RX on channel 0.
     Initial centre frequency is set to SWEEP_START_HZ (2.400 GHz).
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     import sys
 
     p = argparse.ArgumentParser(description="USRP X300 sweep capture test")
-    p.add_argument("--addr",   default="192.168.10.2")
+    p.add_argument("--addr",   default="192.168.5.111")
     p.add_argument("--gain",   type=float, default=DEFAULT_GAIN_DB)
     p.add_argument("--frames", type=int,   default=3,
                    help="Test frames to capture per frequency step")

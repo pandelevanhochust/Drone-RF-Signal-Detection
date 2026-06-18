@@ -171,8 +171,8 @@ def get_args():
                    help="Path to fused quantized TFLite model")
     p.add_argument("--labels",     default="class_names.txt",
                    help="Path to class_names.txt")
-    p.add_argument("--addr",       default="192.168.10.2",
-                   help="USRP X300 IP address (default: 192.168.10.2)")
+    p.add_argument("--addr",       default="192.168.5.111",
+                   help="USRP X300 IP address (default: 192.168.5.111)")
     p.add_argument("--gain",       type=float, default=35.0,
                    help="USRP RX gain in dB, range 0-31.5 (default: 30.0)")
     p.add_argument("--cpu",        action="store_true",

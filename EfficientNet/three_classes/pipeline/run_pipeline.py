@@ -154,7 +154,7 @@ def get_args():
     p.add_argument("--model",        default="../new_three_classes.tflite")
     p.add_argument("--labels",       default="class_names.txt",
                    help="class_names.txt — must contain DRONE, DRONE_SIGNAL, NO_DRONE")
-    p.add_argument("--addr",         default="192.168.10.2")
+    p.add_argument("--addr",         default="192.168.5.111")
     p.add_argument("--gain",         type=float, default=35.0)
     p.add_argument("--cpu",          action="store_true",
                    help="Disable NPU delegate, run on CPU only")

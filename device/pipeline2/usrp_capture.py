@@ -34,8 +34,8 @@ No manual interleaving or /2048 conversion needed.
 
 Connection
 ----------
-    X300 via 10 GbE: default IP 192.168.10.2
-    Verify: uhd_find_devices --args="addr=192.168.10.2"
+    X300 via 10 GbE: default IP 192.168.5.111
+    Verify: uhd_find_devices --args="addr=192.168.5.111"
 
 Setup (run once)
 ----------------
@@ -45,7 +45,7 @@ Setup (run once)
 
 Standalone test
 ---------------
-    python3 usrp_capture.py --addr 192.168.10.2 --gain 30
+    python3 usrp_capture.py --addr 192.168.5.111 --gain 30
 """
 
 import queue
@@ -87,7 +87,7 @@ STREAM_WIRE_FMT = "sc16"
 #  Device open / close
 # ─────────────────────────────────────────────────────────────────────────────
 
-def open_usrp(addr: str = "192.168.10.2", gain: float = DEFAULT_GAIN_DB):
+def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
     """
     Open and configure USRP X300 for continuous RX on channel 0.
 
@@ -308,7 +308,7 @@ if __name__ == "__main__":
     import argparse, sys
 
     p = argparse.ArgumentParser(description="USRP X300 capture test")
-    p.add_argument("--addr", default="192.168.10.2")
+    p.add_argument("--addr", default="192.168.5.111")
     p.add_argument("--gain", type=float, default=DEFAULT_GAIN_DB)
     args = p.parse_args()
 
