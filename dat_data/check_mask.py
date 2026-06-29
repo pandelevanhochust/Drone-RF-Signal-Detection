@@ -1,240 +1,331 @@
 """
 inspect_single_spectrogram.py
 ==============================
-Takes ONE spectrogram PNG and returns three outputs saved as PNGs:
+Takes ONE spectrogram PNG and saves three output PNGs:
 
-    1. pre_norm.png        — after resize + ToTensor, before ImageNet normalisation
-                             (the "raw float" view, values in [0,1])
-    2. proxy_energy_mask.png — binary proxy mask used as U-Net gt_mask during training
-                             (mean-channel energy → min-max norm → threshold 0.5)
-    3. roi_masked.png      — mask × pre-norm tensor  (what ROIExtractor feeds to the
-                             classifier, before the final 224×224 resize)
+    1. {stem}__pre_norm.png   -- after resize + ToTensor, before ImageNet
+                                 normalisation. Values in [0, 1].
+    2. {stem}__unet_mask.png  -- real U-Net binary mask from the trained
+                                 DronePipeline (not the proxy energy mask).
+    3. {stem}__roi_masked.png -- mask x pre-norm tensor, exactly what
+                                 ROIExtractor feeds to the classifier.
 
 Usage:
-    python inspect_single_spectrogram.py --img path/to/spectrogram.png
-    python inspect_single_spectrogram.py --img path/to/spectrogram.png --img_size 256 512 --threshold 0.5 --out_dir ./outputs
+    python inspect_single_spectrogram.py \
+        --img        path/to/spectrogram.png \
+        --checkpoint checkpoints/best_model.pth
+
+    python inspect_single_spectrogram.py \
+        --img        path/to/spectrogram.png \
+        --checkpoint checkpoints/best_model.pth \
+        --img_size   256 512 \
+        --threshold  0.7 \
+        --out_dir    ./outputs
 """
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ImageNet stats (same as drone_dataloader.py)
-# ─────────────────────────────────────────────────────────────────────────────
+from roi import DronePipeline
+
+
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# Image / tensor utilities
+# =============================================================================
 
 def tensor_to_pil(t: torch.Tensor) -> Image.Image:
-    """
-    Convert a (C, H, W) float32 tensor in [0, 1] to a PIL RGB image.
-    Values are clamped so nothing clips.
-    """
-    t = t.clamp(0.0, 1.0)
-    arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    """(C, H, W) float32 [0,1] -> PIL RGB image."""
+    arr = (t.clamp(0.0, 1.0).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr, mode="RGB")
 
 
 def mask_to_pil(mask: torch.Tensor) -> Image.Image:
-    """
-    Convert a (1, H, W) or (H, W) binary float mask to a grayscale PIL image.
-    White = mask ON (kept), black = mask OFF (zeroed).
-    """
+    """(1, H, W) or (H, W) binary float -> PIL grayscale. White=ON, Black=OFF."""
     if mask.ndim == 3:
         mask = mask.squeeze(0)
     arr = (mask.numpy() * 255).astype(np.uint8)
     return Image.fromarray(arr, mode="L")
 
 
-def compute_proxy_mask(tensor: torch.Tensor, threshold: float = 0.7) -> torch.Tensor:
+# =============================================================================
+# Model loader
+# =============================================================================
+
+def load_pipeline(
+    checkpoint_path: str,
+    device: torch.device,
+    threshold: float,
+) -> DronePipeline:
     """
-    Replicates the exact proxy-mask logic from main.py's train_one_epoch().
+    Restore DronePipeline from a checkpoint saved by main.py.
 
     Args:
-        tensor    : (C, H, W) float32 tensor, values in [0, 1] — pre-normalisation
-        threshold : binarisation cutoff (default 0.5, same as training)
+        checkpoint_path : path to best_model.pth
+        device          : torch device
+        threshold       : U-Net sigmoid binarisation threshold
 
     Returns:
-        mask : (1, H, W) binary float32 tensor  (1 = keep, 0 = zero out)
-
-    Logic (copied verbatim from main.py):
-        energy  = images.mean(dim=1, keepdim=True)               # mean across channels
-        e_min   = energy.flatten(1).min(1)[0].view(-1,1,1,1)
-        e_max   = energy.flatten(1).max(1)[0].view(-1,1,1,1)
-        gt_mask = (energy - e_min) / (e_max - e_min + 1e-8)      # min-max normalise
-        gt_mask = (gt_mask > threshold).float()                   # binarise
+        DronePipeline in eval mode on device
     """
-    # Add a batch dim so we match the batched shapes in main.py exactly
-    x = tensor.unsqueeze(0)                                   # (1, C, H, W)
-    energy = x.mean(dim=1, keepdim=True)                      # (1, 1, H, W)
-    e_min  = energy.flatten(1).min(1)[0].view(-1, 1, 1, 1)   # (1, 1, 1, 1)
-    e_max  = energy.flatten(1).max(1)[0].view(-1, 1, 1, 1)   # (1, 1, 1, 1)
-    norm   = (energy - e_min) / (e_max - e_min + 1e-8)       # (1, 1, H, W)
-    mask   = (norm > threshold).float()                       # (1, 1, H, W)
-    return mask.squeeze(0)                                    # (1, H, W)
+    print(f"  Loading checkpoint : {checkpoint_path}")
+    ckpt       = torch.load(checkpoint_path, map_location=device)
+    meta       = ckpt.get("meta", {})
+    train_args = ckpt.get("args", {})
+
+    model = DronePipeline(
+        num_classes       = meta.get("num_classes", train_args.get("num_classes", 8)),
+        in_channels       = 3,
+        unet_base_filters = train_args.get("unet_base_filters", 32),
+        roi_output_size   = (224, 224),
+        mask_threshold    = threshold,
+        roi_strategy      = "multiply",
+    ).to(device)
+
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+
+    print(f"  Restored from epoch : {ckpt.get('epoch', '?')}")
+    print(f"  Best val accuracy   : {ckpt.get('best_val_acc', 0.0):.2f}%")
+    print(f"  Classes             : {meta.get('class_names', [])}")
+    return model
 
 
-def apply_roi_mask(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+# =============================================================================
+# Core pipeline steps
+# =============================================================================
+
+def load_and_resize(
+    img_path: str,
+    img_size: tuple,
+) -> torch.Tensor:
     """
-    Replicates Stage-2 ROIExtractor (strategy='multiply') from roi.py.
+    Open PNG as RGB, resize to img_size, convert to float32 tensor [0, 1].
+
+    Returns:
+        pre_norm : (3, H, W) float32 tensor
+    """
+    pil_img = Image.open(img_path).convert("RGB")
+    print(f"    Original size : {pil_img.size}  (W x H)")
+
+    transform = transforms.Compose([
+        transforms.Resize(
+            img_size,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
+        transforms.ToTensor(),   # [0,255] uint8 -> [0,1] float32 (C,H,W)
+    ])
+    pre_norm = transform(pil_img)
+    print(f"    Pre-norm tensor : shape={tuple(pre_norm.shape)}"
+          f"  min={pre_norm.min():.4f}  max={pre_norm.max():.4f}")
+    return pre_norm
+
+
+def compute_unet_mask(
+    pre_norm  : torch.Tensor,
+    model     : DronePipeline,
+    device    : torch.device,
+    threshold : float,
+) -> torch.Tensor:
+    """
+    ImageNet-normalise pre_norm, run the U-Net, return a binary mask.
+
+    Matches exactly what happens inside DronePipeline during training
+    and inference — the model never sees un-normalised tensors.
 
     Args:
-        tensor : (C, H, W) pre-norm float32 tensor
-        mask   : (1, H, W) binary float32 mask
+        pre_norm  : (3, H, W) float32 in [0, 1] — NOT yet normalised
+        model     : loaded DronePipeline in eval mode
+        device    : torch device
+        threshold : sigmoid binarisation cutoff
 
     Returns:
-        roi : (C, H, W) masked tensor — background pixels are 0
+        binary_mask : (1, H, W) float32  (1 = kept, 0 = zeroed)
     """
-    return tensor * mask   # broadcast across C channels
+    norm   = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+    normed = norm(pre_norm).unsqueeze(0).to(device)   # (1, 3, H, W)
+
+    with torch.no_grad():
+        raw_mask = model.unet(normed)                 # (1, 1, H, W) sigmoid
+        binary   = (raw_mask >= threshold).float()    # (1, 1, H, W) binary
+
+    return binary.squeeze(0).cpu()                    # (1, H, W)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+def apply_roi_mask(
+    pre_norm  : torch.Tensor,
+    mask      : torch.Tensor,
+) -> torch.Tensor:
+    """
+    Multiply pre_norm by the binary mask (ROIExtractor multiply strategy).
+
+    Args:
+        pre_norm : (3, H, W) float32 in [0, 1]
+        mask     : (1, H, W) binary float32
+
+    Returns:
+        roi : (3, H, W) — background pixels are exactly 0
+    """
+    return pre_norm * mask   # mask broadcasts across C channels
+
+
+# =============================================================================
+# Main inspection function
+# =============================================================================
 
 def inspect(
-    img_path: str,
-    img_size: tuple[int, int] = (256, 512),
-    threshold: float = 0.5,
-    out_dir: str = ".",
-) -> dict[str, torch.Tensor]:
+    img_path        : str,
+    checkpoint_path : str,
+    img_size        : tuple  = (256, 512),
+    threshold       : float  = 0.7,
+    out_dir         : str    = ".",
+) -> dict:
     """
     Full inspection pipeline for a single spectrogram PNG.
 
+    Steps
+    -----
+    0. Load DronePipeline from checkpoint
+    1. Load PNG -> resize -> ToTensor  (pre_norm)
+    2. ImageNet-normalise -> U-Net forward -> binary mask
+    3. mask x pre_norm -> ROI tensor
+    4. Save all three as PNGs and print a stats table
+
     Args:
-        img_path  : path to input .png spectrogram
-        img_size  : (H, W) — must both be divisible by 16 (U-Net constraint)
-        threshold : proxy mask binarisation threshold (default 0.5)
-        out_dir   : directory to save output PNGs
+        img_path        : input spectrogram PNG
+        checkpoint_path : best_model.pth from main.py
+        img_size        : (H, W) — both must be divisible by 16
+        threshold       : U-Net sigmoid binarisation threshold
+        out_dir         : directory for output PNGs
 
     Returns:
-        dict with keys:
-            "pre_norm"     : (3, H, W) tensor, values in [0, 1]
-            "proxy_mask"   : (1, H, W) binary tensor
-            "roi_masked"   : (3, H, W) tensor, background zeroed
+        dict with keys "pre_norm", "unet_mask", "roi_masked"
     """
     H, W = img_size
     assert H % 16 == 0 and W % 16 == 0, (
-        f"img_size ({H}, {W}) must both be divisible by 16 for the U-Net."
+        f"img_size ({H}, {W}) — both values must be divisible by 16 "
+        f"(U-Net has 4x MaxPool2d stride-2 layers)."
     )
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: Load PNG as RGB (viridis colormap → 3 channels) ──────────────
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n  Device : {device}")
+
+    # ── Step 0: Load model ────────────────────────────────────────────────────
+    print(f"\n[0] Loading model ...")
+    model = load_pipeline(checkpoint_path, device, threshold)
+
+    # ── Step 1: Load + resize image ───────────────────────────────────────────
     print(f"\n[1] Loading image: {img_path}")
-    pil_img = Image.open(img_path).convert("RGB")
-    print(f"    Original size : {pil_img.size}  (W×H)")
+    pre_norm = load_and_resize(img_path, img_size)    # (3, H, W)
 
-    # ── Step 2: Resize + ToTensor  (matches get_transforms("val")) ───────────
-    resize_and_to_tensor = transforms.Compose([
-        transforms.Resize(
-            (H, W),
-            interpolation=transforms.InterpolationMode.BILINEAR,
-            antialias=True,
-        ),
-        transforms.ToTensor(),   # PIL [0,255] uint8  →  float32 [0,1] (C,H,W)
-    ])
-    pre_norm: torch.Tensor = resize_and_to_tensor(pil_img)   # (3, H, W)
-    print(f"    Pre-norm tensor : shape={tuple(pre_norm.shape)}"
-          f"  min={pre_norm.min():.4f}  max={pre_norm.max():.4f}")
+    # ── Step 2: U-Net mask ────────────────────────────────────────────────────
+    print(f"\n[2] Running U-Net  (threshold={threshold}) ...")
+    unet_mask = compute_unet_mask(pre_norm, model, device, threshold)
+    kept_pct  = unet_mask.mean().item() * 100
+    print(f"    Mask shape  : {tuple(unet_mask.shape)}")
+    print(f"    Pixels kept : {kept_pct:.1f}%"
+          f"  ({unet_mask.sum().int().item()} / {H * W})")
 
-    # ── Step 3: Proxy energy mask (gt_mask from main.py) ─────────────────────
-    print(f"\n[2] Computing proxy energy mask  (threshold={threshold}) …")
-    proxy_mask: torch.Tensor = compute_proxy_mask(pre_norm, threshold)
-    kept_pct = proxy_mask.mean().item() * 100
-    print(f"    Mask shape  : {tuple(proxy_mask.shape)}")
-    print(f"    Pixels kept : {kept_pct:.1f}%  ({proxy_mask.sum().int().item()} / {H*W})")
-
-    # ── Step 4: ROI masked tensor (Stage-2 multiply strategy) ────────────────
-    print(f"\n[3] Applying ROI mask (multiply strategy) …")
-    roi_masked: torch.Tensor = apply_roi_mask(pre_norm, proxy_mask)
+    # ── Step 3: ROI masked tensor ─────────────────────────────────────────────
+    print(f"\n[3] Applying ROI mask (multiply strategy) ...")
+    roi_masked  = apply_roi_mask(pre_norm, unet_mask)
     nonzero_pct = (roi_masked.sum(dim=0) > 0).float().mean().item() * 100
-    print(f"    ROI tensor shape    : {tuple(roi_masked.shape)}")
-    print(f"    Non-zero pixel cols : {nonzero_pct:.1f}% of spatial positions")
+    print(f"    ROI tensor shape     : {tuple(roi_masked.shape)}")
+    print(f"    Non-zero spatial pos : {nonzero_pct:.1f}%")
 
-    # ── Step 5: Save outputs ──────────────────────────────────────────────────
-    stem = Path(img_path).stem
-
-    pre_norm_path  = out_dir / f"{stem}__pre_norm.png"
-    mask_path      = out_dir / f"{stem}__proxy_energy_mask.png"
-    roi_path       = out_dir / f"{stem}__roi_masked.png"
+    # ── Step 4: Save outputs ──────────────────────────────────────────────────
+    stem          = Path(img_path).stem
+    pre_norm_path = out_dir / f"{stem}__pre_norm.png"
+    mask_path     = out_dir / f"{stem}__unet_mask.png"
+    roi_path      = out_dir / f"{stem}__roi_masked.png"
 
     tensor_to_pil(pre_norm).save(pre_norm_path)
-    mask_to_pil(proxy_mask).save(mask_path)
+    mask_to_pil(unet_mask).save(mask_path)
     tensor_to_pil(roi_masked).save(roi_path)
 
-    print(f"\n[✓] Saved outputs to: {out_dir.resolve()}")
-    print(f"    pre_norm          → {pre_norm_path.name}")
-    print(f"    proxy_energy_mask → {mask_path.name}")
-    print(f"    roi_masked        → {roi_path.name}")
+    print(f"\n[OK] Saved outputs -> {out_dir.resolve()}")
+    print(f"     pre_norm   -> {pre_norm_path.name}")
+    print(f"     unet_mask  -> {mask_path.name}")
+    print(f"     roi_masked -> {roi_path.name}")
 
-    # ── Step 6: Print full tensor stats table ─────────────────────────────────
-    print(f"\n{'─'*60}")
-    print(f"  {'Tensor':<22}  {'Shape':<18}  {'Min':>7}  {'Max':>7}  {'Mean':>7}")
-    print(f"{'─'*60}")
+    # ── Step 5: Stats table ───────────────────────────────────────────────────
+    sep = "-" * 62
+    print(f"\n{sep}")
+    print(f"  {'Tensor':<24}  {'Shape':<18}  {'Min':>7}  {'Max':>7}  {'Mean':>7}")
+    print(sep)
     for name, t in [
-        ("pre_norm",          pre_norm),
-        ("proxy_mask (float)", proxy_mask),
+        ("pre_norm",           pre_norm),
+        ("unet_mask (binary)", unet_mask),
         ("roi_masked",         roi_masked),
     ]:
         print(
-            f"  {name:<22}  {str(tuple(t.shape)):<18}"
-            f"  {t.min().item():>7.4f}  {t.max().item():>7.4f}  {t.mean().item():>7.4f}"
+            f"  {name:<24}  {str(tuple(t.shape)):<18}"
+            f"  {t.min().item():>7.4f}"
+            f"  {t.max().item():>7.4f}"
+            f"  {t.mean().item():>7.4f}"
         )
-    print(f"{'─'*60}")
+    print(sep)
 
-    # ── Optional: also print ImageNet-normalized stats (for reference) ────────
-    normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    normed = normalize(pre_norm)
-    print(f"\n  (For reference — after ImageNet normalization:)")
+    # ImageNet-normalised stats for reference
+    normed = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(pre_norm)
+    print(f"\n  (After ImageNet normalisation -- what the model actually receives:)")
     print(
-        f"  {'normed_tensor':<22}  {str(tuple(normed.shape)):<18}"
-        f"  {normed.min().item():>7.4f}  {normed.max().item():>7.4f}  {normed.mean().item():>7.4f}"
+        f"  {'normed_tensor':<24}  {str(tuple(normed.shape)):<18}"
+        f"  {normed.min().item():>7.4f}"
+        f"  {normed.max().item():>7.4f}"
+        f"  {normed.mean().item():>7.4f}"
     )
 
     return {
-        "pre_norm"   : pre_norm,
-        "proxy_mask" : proxy_mask,
-        "roi_masked" : roi_masked,
+        "pre_norm"  : pre_norm,
+        "unet_mask" : unet_mask,
+        "roi_masked": roi_masked,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # CLI
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def get_args():
     p = argparse.ArgumentParser(
-        description="Inspect a single spectrogram through the drone dataloader pipeline."
+        description="Inspect a single spectrogram through the drone pipeline."
     )
     p.add_argument(
         "--img", required=True,
-        help="Path to the input spectrogram PNG."
+        help="Path to the input spectrogram PNG.",
+    )
+    p.add_argument(
+        "--checkpoint", required=True,
+        help="Path to best_model.pth saved by main.py.",
     )
     p.add_argument(
         "--img_size", nargs=2, type=int, default=[256, 512],
         metavar=("H", "W"),
-        help="Resize target (H W). Both must be divisible by 16. Default: 256 512"
+        help="Resize target. Both must be divisible by 16. Default: 256 512",
     )
     p.add_argument(
-        "--threshold", type=float, default=0.5,
-        help="Proxy mask binarisation threshold (default 0.5, same as training)."
+        "--threshold", type=float, default=0.7,
+        help="U-Net sigmoid binarisation threshold (default 0.7).",
     )
     p.add_argument(
         "--out_dir", default=".",
-        help="Output directory for saved PNGs. Default: current directory."
+        help="Output directory for saved PNGs. Default: current directory.",
     )
     return p.parse_args()
 
@@ -242,8 +333,9 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     inspect(
-        img_path  = args.img,
-        img_size  = tuple(args.img_size),
-        threshold = args.threshold,
-        out_dir   = args.out_dir,
+        img_path        = args.img,
+        checkpoint_path = args.checkpoint,
+        img_size        = tuple(args.img_size),
+        threshold       = args.threshold,
+        out_dir         = args.out_dir,
     )

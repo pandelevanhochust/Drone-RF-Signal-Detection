@@ -14,13 +14,12 @@ from typing import Optional, Dict
 
 from bladerf import _bladerf
 
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
-                            QPushButton, QHBoxLayout, QComboBox, QFormLayout,
-                            QLineEdit, QLabel, QMessageBox, QSpinBox, QFrame,
-                            QSlider, QGroupBox, QFileDialog, QScrollArea)
-from PyQt5.QtCore import QTimer, QLocale, QThread, QRectF, Qt
-from PyQt5.QtGui import QIcon
-from PyQt5 import QtCore
+from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget,
+                                  QPushButton, QHBoxLayout, QComboBox, QFormLayout,
+                                  QLineEdit, QLabel, QMessageBox, QSpinBox, QFrame,
+                                  QSlider, QGroupBox, QFileDialog, QScrollArea)
+from PySide6.QtCore import QTimer, QLocale, QThread, QRectF, Qt
+from PySide6.QtGui import QIcon
 
 import pyqtgraph as pg
 

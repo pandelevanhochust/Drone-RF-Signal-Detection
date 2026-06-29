@@ -35,7 +35,7 @@ def file_duration_ms(file_path: str, sample_rate: float) -> float:
 def compute_spectrogram(file_path: str,
                         sample_rate: float,
                         start_ms: float,
-                        duration_ms: float = 80.0,
+                        duration_ms: float = 20.0,
                         nfft: int = 1024) -> np.ndarray:
     """Read one window from the SC16 .bin file. Returns spec_db."""
     samples_to_skip = int(sample_rate * (start_ms   / 1000.0))
@@ -130,7 +130,7 @@ def parse_args():
     p.add_argument("--out",         default="output_images", help="Output directory")
     p.add_argument("--fs",          type=float, default=60e6, help="Sample rate (Hz)")
     p.add_argument("--nfft",        type=int,   default=1024, help="FFT size")
-    p.add_argument("--duration_ms", type=float, default=80.0, help="Window length (ms)")
+    p.add_argument("--duration_ms", type=float, default=10.0, help="Window length (ms)")
 
     group = p.add_mutually_exclusive_group()
     group.add_argument("--overlap", type=float, default=None,
