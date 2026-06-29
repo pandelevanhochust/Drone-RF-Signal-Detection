@@ -54,7 +54,7 @@ IMG_H, IMG_W = 256, 512
 
 # Per-class console alert tags
 _ALERT = {
-    "DRONE"        : "  ⚠⚠ DRONE DETECTED",
+    "DRONE"        : "  ⚠⚠ DRONE VIDEO",
     "DRONE_SIGNAL" : "  ~  DRONE SIGNAL",
     "NO_DRONE"     : "",
 }
@@ -172,7 +172,7 @@ def get_args():
     p.add_argument("--model",        default="../new_three_classes.tflite")
     p.add_argument("--labels",       default="class_names.txt",
                    help="One class per line: DRONE, DRONE_SIGNAL, NO_DRONE")
-    p.add_argument("--addr",         default="192.168.5.111")
+    p.add_argument("--addr",         default="192.168.5.115")
     p.add_argument("--gain",         type=float, default=35.0)
     p.add_argument("--cpu",          action="store_true",
                    help="Disable NPU delegate, run on CPU only")
