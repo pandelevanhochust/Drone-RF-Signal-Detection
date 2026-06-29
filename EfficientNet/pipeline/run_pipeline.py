@@ -1,27 +1,25 @@
 """
 run_pipeline.py
 ===============
-Entry point: wires usrp_capture, stft_preprocessor, and drone_inference
-together into the continuous live 3-class detection pipeline.
+Điểm khởi chạy: kết nối usrp_capture, stft_preprocessor và drone_inference
+thành pipeline phát hiện drone 3 lớp liên tục theo thời gian thực.
 
-Classes
--------
-    DRONE        : Strong vertical stripe RF blocks
-    DRONE_SIGNAL : Sparse energy bursts / partial drone signature
-    NO_DRONE     : Background noise
+Các lớp phân loại:
+    DRONE        : Tín hiệu drone rõ ràng (dải dọc đậm trên spectrogram)
+    DRONE_SIGNAL : Tín hiệu drone yếu / thoáng qua
+    NO_DRONE     : Nhiễu nền không có drone
 
-Threading model
----------------
-    USRP-Capture thread  (background daemon)
-        capture_frame() in a tight loop
-        pushes complex64 IQ arrays onto frame_queue
-        drops oldest entry when queue is full (never blocks capture)
+Mô hình thread:
+    Thread USRP-Capture (daemon nền)
+        capture_frame() trong vòng lặp liên tục
+        đẩy IQ array complex64 vào frame_queue
+        bỏ entry cũ nhất khi queue đầy (không bao giờ block capture)
 
     Main thread
-        pulls IQ from frame_queue
-        calls iq_to_spectrogram()   [CPU, ~12 ms]
-        calls inferencer.run()      [NPU, ~22 ms]
-        prints one result line per frame
+        kéo IQ từ frame_queue
+        gọi iq_to_spectrogram()   [CPU, ~12 ms]
+        gọi inferencer.run()      [NPU, ~22 ms]
+        in một dòng kết quả mỗi frame
 
 Usage
 -----
@@ -50,7 +48,7 @@ from telemetry_sender  import TelemetrySender
 
 IMG_H, IMG_W = 256, 512
 
-# Alert level per class — used for console flag and telemetry priority
+# Nhãn cảnh báo hiển thị trên console theo từng lớp
 _ALERT = {
     "DRONE"        : "  ⚠⚠ DRONE DETECTED",
     "DRONE_SIGNAL" : "  ~  DRONE SIGNAL",
@@ -70,18 +68,6 @@ def processing_loop(
     save_dir    : str  = None,
     no_infer    : bool = False,
 ) -> None:
-    """
-    Pull IQ frames → STFT on CPU → 3-class NPU inference → telemetry POST.
-
-    Parameters
-    ----------
-    frame_queue : shared queue fed by the USRP capture thread
-    inferencer  : DroneInferencer instance (None if no_infer=True)
-    stop_event  : set by SIGINT handler to exit cleanly
-    sender      : TelemetrySender instance (None to skip telemetry)
-    save_dir    : if set, saves each spectrogram as a debug PNG
-    no_infer    : if True, only runs STFT (skips inference and telemetry)
-    """
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         print(f"[Pipeline] Saving spectrograms to {save_dir}/\n")

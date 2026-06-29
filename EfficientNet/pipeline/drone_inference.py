@@ -39,18 +39,6 @@ CONFIDENCE_THRESHOLD = 0.70
 
 
 class DroneInferencer:
-    """
-    Wraps EfficientViT-L2 TFLite for single-call 3-class inference.
-
-    Parameters
-    ----------
-    model_path           : path to .tflite model file
-    labels_path          : path to class_names.txt (one class per line)
-    use_npu              : True  → QNN HTP delegate (Hexagon NPU)
-                           False → CPU (XNNPACK)
-    confidence_threshold : Minimum softmax confidence to trust top-1 class.
-                           Below threshold → result forced to NO_DRONE.
-    """
 
     def __init__(
         self,

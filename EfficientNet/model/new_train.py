@@ -1,5 +1,5 @@
 """
-new_train2.py
+new_train.py
 =============================================================================
 3-Class Spectrogram Classifier: DRONE, DRONE_SIGNAL, and NO_DRONE
 Architecture  : EfficientNet-B0 (From Scratch, 100% NPU Compliant)
@@ -34,14 +34,10 @@ log = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# 1. Leakage-Free Stratified Group Data Engine
+# 1. Chia dataset thành các tập train / val / test
 # ===========================================================================
 
 def _extract_recording_id(filename: str) -> str:
-    """
-    Unified extraction parser matching both DRONE, DRONE_SIGNAL, and NO_DRONE variations.
-    Ensures adjacent timeline frames stay grouped together during partitioning.
-    """
     stem = Path(filename).stem
 
     # 1. Capture double underscore layout markers (24G__, drone__, noise__)
@@ -63,10 +59,6 @@ def split_dataset(
     split_ratio: float = 0.2,
     seed: int = 42,
 ) -> None:
-    """
-    Groups frames by parent recording ID, sorts them by total volume size,
-    and applies a greedy stratified assignment map to guarantee balanced image splits.
-    """
     src = Path(src_dir)
     dest = Path(dest_dir)
 
@@ -200,7 +192,7 @@ def get_dataloaders(
 
 
 # ===========================================================================
-# 3. Custom Pure CNN Architecture Block (100% NPU Hardware Fused)
+# 3. Kiến trúc EfficientNet-B0 (Tối ưu 100% cho NPU))
 # ===========================================================================
 
 def _make_divisible(v: float, d: int = 8) -> int:
@@ -450,7 +442,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, de
 # ===========================================================================
 # 5. Static ONNX Graph Export Driver
 # ===========================================================================
-
+# Convert model sang ONNX
 def export_to_onnx(model: nn.Module, output_path: str = "drone_classifier_b0.onnx", num_classes: int = 3, opset_version: int = 17, img_h: int = 256, img_w: int = 512) -> None:
     model.eval()
     model.cpu()

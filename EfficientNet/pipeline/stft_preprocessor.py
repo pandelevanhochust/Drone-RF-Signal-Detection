@@ -1,37 +1,29 @@
 """
 stft_preprocessor.py
 ====================
-Converts a raw IQ frame (complex64 ndarray) into a [0.0, 1.0] normalised
-STFT spectrogram tensor ready for the EfficientViT-L2 TFLite model.
+Chuyển đổi một IQ frame (complex64 ndarray) thành tensor spectrogram STFT
+chuẩn hoá về [0.0, 1.0] sẵn sàng đưa vào mô hình TFLite EfficientNet-B0.
 
-Preprocessing contract (must match train_and_export.py get_transforms exactly)
--------------------------------------------------------------------------------
-    IQ → scipy STFT → fftshift → dB → crop skirt → min-max norm → uint8
-    → bilinear resize (256×512) → viridis LUT → /255.0 → NCHW float32
+Pipeline xử lý (phải khớp chính xác với get_transforms() trong train):
+    IQ → scipy STFT → fftshift → dB → cắt skirt → chuẩn hoá min-max → uint8
+    → resize bilinear (256×512) → viridis LUT → /255.0 → NCHW float32
 
-    NO ImageNet mean/std normalisation.
-    train_and_export.py uses ToTensor() ONLY → [0.0, 1.0].
-    Applying IMAGENET_MEAN/STD here would shift the pixel distribution
-    seen at inference away from the training distribution → accuracy drop.
+    KHÔNG áp dụng ImageNet mean/std.
+    Script train chỉ dùng ToTensor() → [0.0, 1.0].
 
-IMAGENET_MEAN / IMAGENET_STD are kept as constants for save_spectrogram_png()
-visualisation only — they are NOT applied in iq_to_spectrogram().
-
-Matches training script (compute_spectrogram_efficient) exactly
----------------------------------------------------------------
-    library         : scipy.signal.stft
+Thông số STFT (khớp chính xác với compute_spectrogram_efficient lúc tạo dataset):
+    thư viện        : scipy.signal.stft
     nfft            : 1024
     window          : hamming(1024)
     return_onesided : False
     noverlap        : 0  (hop = nfft)
-    fftshift        : yes
-    dB scale        : 10*log10(|Zxx|^2+1e-10)
+    fftshift        : có
+    thang dB        : 10*log10(|Zxx|^2+1e-10)
     colormap        : viridis
     origin          : lower
-    output size     : (256, 512)  bilinear resize
+    kích thước ra   : (256, 512)  resize bilinear
 
-Standalone test
----------------
+Chạy độc lập để kiểm tra:
     python3 stft_preprocessor.py
 """
 
@@ -45,7 +37,7 @@ from scipy.signal import stft as scipy_stft
 from scipy.signal.windows import hamming
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Constants — matched to training script
+#  Hằng số — khớp với script train
 # ─────────────────────────────────────────────────────────────────────────────
 
 SAMPLE_RATE_HZ = 25_000_000
@@ -55,43 +47,41 @@ WINDOW         = hamming(NFFT)
 
 IMG_H, IMG_W   = 256, 512
 
-# Kept for save_spectrogram_png() visualisation ONLY — not used in inference
+# Chỉ dùng cho save_spectrogram_png() — KHÔNG dùng trong inference
 IMAGENET_MEAN  = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD   = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-# Anti-aliasing filter skirt crop
+# Tỉ lệ cắt bỏ dải tần biên (anti-aliasing filter skirt)
 SKIRT_CROP     = 0.12
 
-# Viridis colormap LUT — matches training cmap='viridis'
+# Bảng LUT viridis — khớp với cmap='viridis' lúc train
 _VIRIDIS_LUT = (
     matplotlib.colormaps["viridis"](np.linspace(0, 1, 256))[:, :3] * 255
 ).astype(np.uint8)   # (256, 3) uint8 RGB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Core transform
+#  Hàm chuyển đổi chính
 # ─────────────────────────────────────────────────────────────────────────────
 
 def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
     """
-    Convert one IQ frame to a [0.0, 1.0] normalised STFT spectrogram tensor.
+    Chuyển một IQ frame thành tensor spectrogram STFT chuẩn hoá [0.0, 1.0].
 
-    Pipeline (matches train_and_export.py get_transforms exactly):
-        scipy STFT → fftshift → dB → crop skirt → min-max → uint8
-        → resize (256×512) → viridis LUT → /255.0 → NCHW float32
+    Pipeline: scipy STFT → fftshift → dB → cắt skirt → min-max → uint8
+              → resize (256×512) → viridis LUT → /255.0 → NCHW float32
 
-    NOTE: No ImageNet mean/std normalisation is applied here.
-    train_and_export.py uses only ToTensor() which divides by 255.
+    KHÔNG áp dụng ImageNet mean/std — train chỉ dùng ToTensor() (/255).
 
-    Parameters
-    ----------
+    Tham số
+    -------
     iq : complex64 ndarray, shape (N,)
 
-    Returns
-    -------
-    tensor : float32 ndarray, shape (1, 3, 256, 512)  NCHW  values [0.0, 1.0]
+    Trả về
+    ------
+    tensor : float32 ndarray, shape (1, 3, 256, 512)  NCHW  giá trị [0.0, 1.0]
     """
-    # Step 1: scipy STFT
+    # Bước 1: scipy STFT
     _, _, Zxx = scipy_stft(
         iq,
         fs              = SAMPLE_RATE_HZ,
@@ -101,52 +91,42 @@ def iq_to_spectrogram(iq: np.ndarray) -> np.ndarray:
         return_onesided = False,
     )
 
-    # Step 2: fftshift — DC to centre row
+    # Bước 2: fftshift — đưa DC vào giữa
     Zxx = np.fft.fftshift(Zxx, axes=0)
 
-    # Step 3: dB scale
+    # Bước 3: chuyển sang thang dB
     spec_db = 10.0 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
 
-    # Step 4: crop filter skirt + min-max normalise + flip freq axis
+    # Bước 4: cắt skirt + chuẩn hoá min-max + lật trục tần số
     skirt        = int(NFFT * SKIRT_CROP)
     spec_db_crop = spec_db[skirt : NFFT - skirt, :]
     s_min, s_max = float(spec_db_crop.min()), float(spec_db_crop.max())
     denom        = s_max - s_min if s_max > s_min else 1.0
     norm8        = ((spec_db_crop[::-1] - s_min) / denom * 255).clip(0, 255).astype(np.uint8)
 
-    # Step 5: resize grayscale to (256, 512)
+    # Bước 5: resize grayscale về (256, 512)
     small = np.array(
         Image.fromarray(norm8, mode="L").resize((IMG_W, IMG_H), Image.BILINEAR)
     )   # (256, 512) uint8
 
-    # Step 6: viridis colormap LUT
+    # Bước 6: áp dụng viridis colormap LUT
     rgb = _VIRIDIS_LUT[small]   # (256, 512, 3) uint8
 
-    # Step 7: /255.0 → NCHW float32  — matches ToTensor() in training exactly
-    # DO NOT apply IMAGENET_MEAN / IMAGENET_STD here.
+    # Bước 7: /255.0 → NCHW float32 — khớp chính xác với ToTensor() lúc train
+    # KHÔNG áp dụng IMAGENET_MEAN / IMAGENET_STD ở đây.
     arr = rgb.astype(np.float32) / 255.0              # HWC [0.0, 1.0]
     return arr.transpose(2, 0, 1)[np.newaxis].astype(np.float32)   # (1,3,H,W)
 
 
 def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np.ndarray:
-    """
-    Debug version of iq_to_spectrogram — saves a PNG at every intermediate step.
-
-    Saves:
-        step1_raw_db.png   — raw dB spectrogram via matplotlib viridis
-        step2_norm8.png    — after min-max norm + freq flip, before resize
-        step3_small.png    — after resize to (256, 512), grayscale
-        step4_rgb.png      — after viridis LUT  (true model input colours)
-        step5_final.png    — final tensor scaled back to uint8 for inspection
-                             (should be identical to step4_rgb since no norm applied)
-    """
+    #Debug: lưu PNG tại mỗi bước trung gian để kiểm tra pipeline
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     os.makedirs(debug_dir, exist_ok=True)
 
-    # Step 1
+    # Bước 1
     _, _, Zxx = scipy_stft(iq, fs=SAMPLE_RATE_HZ, window=WINDOW,
                            nperseg=NFFT, noverlap=NOVERLAP, return_onesided=False)
     Zxx     = np.fft.fftshift(Zxx, axes=0)
@@ -161,7 +141,7 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     plt.close(fig)
     print(f"  [debug] step1_raw_db.png  dB=[{spec_db.min():.1f}, {spec_db.max():.1f}]")
 
-    # Step 2
+    # Bước 2
     skirt        = int(NFFT * SKIRT_CROP)
     spec_db_crop = spec_db[skirt : NFFT - skirt, :]
     s_min, s_max = float(spec_db_crop.min()), float(spec_db_crop.max())
@@ -170,21 +150,21 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     Image.fromarray(norm8, mode="L").save(os.path.join(debug_dir, "step2_norm8.png"))
     print(f"  [debug] step2_norm8.png   shape={norm8.shape}")
 
-    # Step 3
+    # Bước 3
     small = np.array(Image.fromarray(norm8, mode="L").resize((IMG_W, IMG_H), Image.BILINEAR))
     Image.fromarray(small, mode="L").save(os.path.join(debug_dir, "step3_small.png"))
     print(f"  [debug] step3_small.png   shape={small.shape}")
 
-    # Step 4
+    # Bước 4
     rgb = _VIRIDIS_LUT[small]
     Image.fromarray(rgb, mode="RGB").save(os.path.join(debug_dir, "step4_rgb.png"))
     print(f"  [debug] step4_rgb.png     shape={rgb.shape}")
 
-    # Step 5: /255.0 only — no ImageNet norm
+    # Bước 5: chỉ /255.0 — không có ImageNet norm
     arr    = rgb.astype(np.float32) / 255.0
     tensor = arr.transpose(2, 0, 1)[np.newaxis].astype(np.float32)
 
-    # Save step 5 — scale back to uint8 (should look identical to step4)
+    # Lưu bước 5 — scale ngược về uint8 (phải trông giống step4_rgb)
     arr_back = (tensor[0].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
     Image.fromarray(arr_back).save(os.path.join(debug_dir, "step5_final.png"))
     print(f"  [debug] step5_final.png   should match step4_rgb.png exactly (no norm applied)")
@@ -192,14 +172,10 @@ def iq_to_spectrogram_debug(iq: np.ndarray, debug_dir: str = "debug_stft") -> np
     return tensor
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Debug helper
-# ─────────────────────────────────────────────────────────────────────────────
-
 def save_spectrogram_png(tensor: np.ndarray, path: str) -> None:
     """
-    Save a (1, 3, H, W) [0,1] tensor as a viewable RGB PNG.
-    No denormalisation needed since no ImageNet norm was applied.
+    Lưu tensor (1, 3, H, W) [0,1] thành file PNG RGB có thể xem được.
+    Không cần denormalise vì không áp dụng ImageNet norm.
     """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     arr = (tensor[0].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
@@ -207,7 +183,7 @@ def save_spectrogram_png(tensor: np.ndarray, path: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Standalone test
+#  Chạy thử độc lập
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -242,7 +218,6 @@ if __name__ == "__main__":
     print(f"  saved      : debug_stft/inference_spec.png")
     print()
 
-    # Debug intermediates
     print("  Running debug pipeline (saves step1–step5 PNGs) ...")
     iq_to_spectrogram_debug(iq, "debug_stft")
     print("\n  All tests passed ✓")

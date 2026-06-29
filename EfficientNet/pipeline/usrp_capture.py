@@ -1,42 +1,24 @@
 """
 usrp_capture.py
 ===============
-USRP X300 IQ frame capture with frequency sweep support.
+Thu tín hiệu IQ từ USRP X300 với chế độ quét tần số (sweep).
 
-Sweep parameters
-----------------
-    Start  : 2.400 GHz
-    Stop   : 2.600 GHz
-    Step   : 25 MHz
-    Steps  : 2.400 → 2.425 → 2.450 → 2.475 → 2.500 →
-             2.525 → 2.550 → 2.575 → 2.600  (9 frequencies)
-    Dwell  : 5 frames per step  (5 × ~115 ms ≈ 575 ms per channel)
-    Cycle  : 9 × 575 ms ≈ ~5.2 s per full sweep
+Thông số quét mặc định:
+    Bắt đầu : 2.400 GHz
+    Kết thúc : 2.475 GHz
+    Bước     : 25 MHz  →  4 tần số: 2.400 / 2.425 / 2.450 / 2.475 GHz
+    Số frame : 5 frame/tần số  (~575 ms/kênh)
+    Chu kỳ   : ~2.3 s cho một vòng quét đầy đủ
 
-    Sweep always continues regardless of detection result.
-    DroneInferencer downstream handles class decisions per frame.
+Thông số RF (khớp với dữ liệu huấn luyện):
+    Sample rate : 25 MHz  (decimation=8)
+    Bandwidth   : 30 MHz
+    Frame size  : 2.000.000 mẫu  (80 ms @ 25 MHz)
+    Stream fmt  : fc32 CPU / sc16 wire
 
-RF parameters (matched to training data collection)
-----------------------------------------------------
-    Sample rate  : 25 MHz   (X300 decimation=8, 3 halfband filters)
-    Bandwidth    : 30 MHz
-    Frame size   : 2,000,000 samples  (80 ms @ 25 MHz)
-    Stream fmt   : fc32 CPU / sc16 wire
-
-Threading model
----------------
-    FrequencySweeper (background daemon)
-        Owns the retune loop — calls _retune() every FRAMES_PER_STEP frames.
-        Pushes (freq_hz, iq_frame) tuples onto frame_queue so the
-        processing loop knows which frequency produced each tensor.
-
-    Main thread (run_pipeline.py)
-        Pulls (freq_hz, iq) from frame_queue.
-        Passes iq to stft_preprocessor, freq_hz to console/telemetry.
-
-Standalone test
----------------
-    python3 usrp_capture.py --addr 192.168.5.111 --gain 30
+Luồng thread:
+    Thread nền (daemon)  →  vòng lặp quét tần số, đẩy (freq_hz, iq) vào frame_queue
+    Main thread          →  kéo (freq_hz, iq) từ queue, chạy STFT + inference
 """
 
 import queue
@@ -46,56 +28,47 @@ import time
 import numpy as np
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Sweep configuration
+#  Cấu hình sweep
 # ─────────────────────────────────────────────────────────────────────────────
 
-SWEEP_START_HZ   = 2_400_000_000    # 2.400 GHz
-SWEEP_STOP_HZ    = 2_475_000_000    # 2.600 GHz
-SWEEP_STEP_HZ    =    25_000_000    # 25 MHz per hop
-FRAMES_PER_STEP  = 5                # frames captured before retuning
+SWEEP_START_HZ  = 2_400_000_000    # 2.400 GHz
+SWEEP_STOP_HZ   = 2_475_000_000    # 2.475 GHz
+SWEEP_STEP_HZ   =    25_000_000    # 25 MHz mỗi bước
+FRAMES_PER_STEP = 5                # số frame thu trước khi đổi tần số
 
-# Build ordered frequency list: [2.400, 2.425, ..., 2.600] GHz
+# Danh sách tần số quét: [2.400, 2.425, 2.450, 2.475] GHz
 SWEEP_FREQS_HZ = list(range(SWEEP_START_HZ,
                              SWEEP_STOP_HZ + SWEEP_STEP_HZ,
                              SWEEP_STEP_HZ))
-NUM_SWEEP_STEPS = len(SWEEP_FREQS_HZ)   # 9
+NUM_SWEEP_STEPS = len(SWEEP_FREQS_HZ)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  RF constants
+#  Hằng số RF
 # ─────────────────────────────────────────────────────────────────────────────
 
-SAMPLE_RATE_HZ  = 25_000_000        # 25 MHz — matches training --fs 25e6
+SAMPLE_RATE_HZ  = 25_000_000        # 25 MHz — khớp với tham số --fs 25e6 lúc train
 BANDWIDTH_HZ    = 30_000_000
 FRAME_DURATION  = 0.080             # 80 ms
-NUM_SAMPLES     = int(SAMPLE_RATE_HZ * FRAME_DURATION)   # 2,000,000
+NUM_SAMPLES     = int(SAMPLE_RATE_HZ * FRAME_DURATION)   # 2.000.000 mẫu
 
-RECV_CHUNK      = 100_000
-RECV_TIMEOUT    = 3.0
-MAX_OVERFLOWS   = 3
+RECV_CHUNK      = 100_000           # số mẫu đọc mỗi lần recv()
+RECV_TIMEOUT    = 3.0               # timeout recv() tính bằng giây
+MAX_OVERFLOWS   = 3                 # số lần overflow liên tiếp trước khi restart stream
 DEFAULT_GAIN_DB = 30.0
 
-STREAM_CPU_FMT  = "fc32"
-STREAM_WIRE_FMT = "sc16"
+STREAM_CPU_FMT  = "fc32"            # định dạng dữ liệu phía CPU
+STREAM_WIRE_FMT = "sc16"            # định dạng truyền qua dây (10GbE)
 
-# PLL settle time after retune — X300 PLL locks in ~10 ms; 50 ms is safe
+# Thời gian chờ PLL khóa sau khi đổi tần số (X300 lock ~10 ms, 50 ms an toàn)
 RETUNE_SETTLE_S = 0.050
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Device open / close
+#  Mở / đóng thiết bị
 # ─────────────────────────────────────────────────────────────────────────────
 
 def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
-    """
-    Open and configure USRP X300 for continuous RX on channel 0.
-    Initial centre frequency is set to SWEEP_START_HZ (2.400 GHz).
-
-    Returns
-    -------
-    usrp     : uhd.usrp.MultiUSRP handle
-    streamer : uhd.usrp.RxStreamer
-    metadata : uhd.types.RXMetadata
-    """
+    """Kết nối và cấu hình USRP X300, trả về (usrp, streamer, metadata)."""
     try:
         import uhd
     except ImportError:
@@ -108,7 +81,7 @@ def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
     print(f"[USRP] Opening  args='{device_args}' ...")
     usrp = uhd.usrp.MultiUSRP(device_args)
 
-    # Sample rate
+    # Cài sample rate
     usrp.set_rx_rate(SAMPLE_RATE_HZ, 0)
     actual_rate = usrp.get_rx_rate(0)
     print(f"  Sample rate : {actual_rate/1e6:.3f} MHz  "
@@ -118,7 +91,7 @@ def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
         print(f"  ⚠  Rate mismatch: requested {SAMPLE_RATE_HZ/1e6} MHz, "
               f"got {actual_rate/1e6:.3f} MHz — STFT will NOT match training.")
 
-    # Initial centre frequency — sweep starts here
+    # Tần số ban đầu — bắt đầu sweep tại đây
     tune_req = uhd.libpyuhd.types.tune_request(SWEEP_START_HZ)
     usrp.set_rx_freq(tune_req, 0)
     actual_freq = usrp.get_rx_freq(0)
@@ -134,24 +107,24 @@ def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
     actual_gain = usrp.get_rx_gain(0)
     print(f"  Gain        : {actual_gain:.1f} dB")
 
-    # Antenna
+    # Anten
     usrp.set_rx_antenna("RX2", 0)
     print(f"  Antenna     : {usrp.get_rx_antenna(0)}")
 
-    # Stream
+    # Tạo stream
     st_args          = uhd.usrp.StreamArgs(STREAM_CPU_FMT, STREAM_WIRE_FMT)
     st_args.channels = [0]
     streamer         = usrp.get_rx_stream(st_args)
     metadata         = uhd.types.RXMetadata()
 
-    # Start continuous stream
+    # Bắt đầu stream liên tục
     stream_cmd            = uhd.types.StreamCMD(uhd.types.StreamMode.start_cont)
     stream_cmd.stream_now = True
     streamer.issue_stream_cmd(stream_cmd)
 
-    time.sleep(0.2)   # PLL lock + FIFO fill
+    time.sleep(0.2)   # chờ PLL khóa + FIFO đầy
 
-    # Print sweep plan
+    # In kế hoạch sweep
     print(f"\n  Sweep plan ({NUM_SWEEP_STEPS} steps × {FRAMES_PER_STEP} frames):")
     for i, f in enumerate(SWEEP_FREQS_HZ):
         print(f"    step {i+1:>2d} : {f/1e9:.4f} GHz")
@@ -162,7 +135,7 @@ def open_usrp(addr: str = "192.168.5.111", gain: float = DEFAULT_GAIN_DB):
 
 
 def close_usrp(usrp, streamer) -> None:
-    """Stop stream and release device cleanly."""
+    """Dừng stream và giải phóng thiết bị."""
     try:
         import uhd
         stop_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont)
@@ -174,45 +147,41 @@ def close_usrp(usrp, streamer) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Internal helpers
+#  Hàm nội bộ
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _retune(usrp, streamer, freq_hz: int) -> None:
     """
-    Retune to freq_hz and restart the RX stream cleanly.
+    Đổi tần số và khởi động lại stream sạch.
 
-    Steps
-    -----
-    1. Stop continuous stream
-    2. Set new centre frequency
-    3. Wait RETUNE_SETTLE_S for PLL lock
-    4. Restart continuous stream
-    5. Discard one dummy recv() to flush stale samples from FIFO
-
-    The dummy flush is critical — without it the first frame after a retune
-    contains residual IQ from the previous frequency, producing a mixed
-    spectrogram that confuses the classifier.
+    Các bước:
+    1. Dừng stream
+    2. Cài tần số mới
+    3. Chờ RETUNE_SETTLE_S để PLL khóa
+    4. Khởi động lại stream
+    5. Flush một chunk rác từ FIFO — nếu bỏ qua, frame đầu tiên sau retune
+       sẽ chứa mẫu IQ cũ từ tần số trước, gây sai lệch spectrogram.
     """
     try:
         import uhd
 
-        # Stop
+        # Dừng stream
         stop_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont)
         streamer.issue_stream_cmd(stop_cmd)
         time.sleep(0.01)
 
-        # Retune
+        # Đổi tần số
         tune_req = uhd.libpyuhd.types.tune_request(freq_hz)
         usrp.set_rx_freq(tune_req, 0)
-        time.sleep(RETUNE_SETTLE_S)   # PLL settle
+        time.sleep(RETUNE_SETTLE_S)   # chờ PLL ổn định
 
-        # Restart
+        # Khởi động lại stream
         start_cmd            = uhd.types.StreamCMD(uhd.types.StreamMode.start_cont)
         start_cmd.stream_now = True
         streamer.issue_stream_cmd(start_cmd)
         time.sleep(0.01)
 
-        # Flush one chunk of stale samples from FIFO
+        # Xả mẫu cũ trong FIFO
         flush_buf = np.zeros((1, RECV_CHUNK), dtype=np.complex64)
         meta      = uhd.types.RXMetadata()
         streamer.recv(flush_buf, meta, timeout=0.5)
@@ -222,7 +191,7 @@ def _retune(usrp, streamer, freq_hz: int) -> None:
 
 
 def _restart_stream(streamer) -> None:
-    """Recover from overflow without full retune."""
+    """Khôi phục stream sau overflow mà không cần đổi tần số."""
     try:
         import uhd
         stop_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont)
@@ -238,17 +207,11 @@ def _restart_stream(streamer) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Single frame capture
+#  Thu một frame IQ
 # ─────────────────────────────────────────────────────────────────────────────
 
 def capture_frame(streamer, metadata) -> np.ndarray:
-    """
-    Capture exactly NUM_SAMPLES IQ samples (one 80 ms frame).
-
-    Returns
-    -------
-    iq : complex64 ndarray, shape (NUM_SAMPLES,)
-    """
+    """Thu đúng NUM_SAMPLES mẫu IQ (một frame 80 ms). Trả về mảng complex64 shape (N,)."""
     buf            = np.zeros((1, RECV_CHUNK), dtype=np.complex64)
     frame          = np.empty(NUM_SAMPLES, dtype=np.complex64)
     total          = 0
@@ -286,7 +249,7 @@ def capture_frame(streamer, metadata) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Frequency sweep capture thread
+#  Thread thu sweep tần số
 # ─────────────────────────────────────────────────────────────────────────────
 
 def start_capture_thread(
@@ -297,42 +260,28 @@ def start_capture_thread(
     usrp        = None,
 ) -> threading.Thread:
     """
-    Sweep across SWEEP_FREQS_HZ continuously, pushing (freq_hz, iq) tuples.
+    Chạy thread nền liên tục quét SWEEP_FREQS_HZ, đẩy tuple (freq_hz, iq) vào queue.
 
-    Sweep behaviour
-    ---------------
-    - Captures FRAMES_PER_STEP frames at each frequency before retuning.
-    - After the last frequency (2.600 GHz) wraps back to 2.400 GHz.
-    - Always sweeps — never pauses on detection.
-    - If frame_queue is full, drops the oldest entry so inference always
-      sees the most recent frame.
+    - Thu FRAMES_PER_STEP frame tại mỗi tần số trước khi đổi kênh.
+    - Nếu queue đầy → bỏ frame cũ nhất, ưu tiên frame mới nhất cho inference.
+    - Truyền usrp=None để cố định tần số (không sweep).
 
-    Parameters
-    ----------
-    usrp : MultiUSRP handle — required for retuning. Pass None to disable
-           sweep (fixed frequency, backward-compatible with old callers).
-
-    Queue item format
-    -----------------
-    (freq_hz: int, iq: np.ndarray)
-        freq_hz — centre frequency this frame was captured at
-        iq      — complex64 (NUM_SAMPLES,)
+    Item trong queue: (freq_hz: int, iq: np.ndarray complex64)
     """
     sweep_enabled = usrp is not None
 
     def _run():
-        step_idx    = 0    # current position in SWEEP_FREQS_HZ
-        frame_count = 0    # frames captured at current step
+        step_idx    = 0    # vị trí hiện tại trong SWEEP_FREQS_HZ
+        frame_count = 0    # số frame đã thu ở bước hiện tại
 
         while not stop_event.is_set():
             current_freq = SWEEP_FREQS_HZ[step_idx]
 
             try:
-                iq = capture_frame(streamer, metadata)
-
-                # Pack freq alongside IQ so processing loop can label results
+                iq   = capture_frame(streamer, metadata)
                 item = (current_freq, iq)
 
+                # Bỏ frame cũ nếu queue đầy
                 if frame_queue.full():
                     try:
                         frame_queue.get_nowait()
@@ -342,7 +291,7 @@ def start_capture_thread(
 
                 frame_count += 1
 
-                # ── Advance to next frequency after FRAMES_PER_STEP ──────────
+                # Chuyển sang tần số tiếp theo sau đủ FRAMES_PER_STEP
                 if sweep_enabled and frame_count >= FRAMES_PER_STEP:
                     step_idx    = (step_idx + 1) % NUM_SWEEP_STEPS
                     frame_count = 0
@@ -363,7 +312,7 @@ def start_capture_thread(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Standalone test
+#  Chạy thử độc lập
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

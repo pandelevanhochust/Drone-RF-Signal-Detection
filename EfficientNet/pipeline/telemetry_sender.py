@@ -1,12 +1,7 @@
 """
 telemetry_sender.py
 =============================================================================
-Sends drone detection results to the telemetry API via HTTP POST.
-
-Refactored Updates
-------------------
-    - Accuracy payload field now passes the exact raw model confidence score
-      for NO_DRONE instead of wiping it to 0.0.
+Gui thong tin duoc phat hien drone len API
 """
 
 import json
@@ -128,13 +123,6 @@ def _post_with_retry(url: str, api_key: str, payload: dict) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TelemetrySender:
-    """
-    Non-blocking telemetry dispatcher for 3-class inference results.
-
-    .send(result) enqueues immediately and returns.
-    Background daemon thread POSTs with retry logic.
-    """
-
     def __init__(self, env_path: str = ".env"):
         env = _load_env(env_path)
 
@@ -165,7 +153,6 @@ class TelemetrySender:
         print(f"[Telemetry] Queue     : {QUEUE_MAXSIZE}  retries={MAX_RETRIES}\n")
 
     def send(self, result: dict) -> None:
-        """Enqueue one inference result for async POST. Never blocks."""
         payload = build_payload(result, self.device_id)
         if self._queue.full():
             try:

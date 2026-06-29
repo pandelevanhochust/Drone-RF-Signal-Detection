@@ -1,38 +1,32 @@
 """
-run_pipeline.py
-===============
-Entry point: wires usrp_capture, stft_preprocessor, and drone_inference
-together into the continuous live 3-class detection pipeline with
-frequency sweep.
+run_pipeline_sweep.py
+=====================
+Điểm khởi chạy: kết nối usrp_capture, stft_preprocessor và drone_inference
+thành pipeline phát hiện drone 3 lớp liên tục với chế độ quét tần số.
 
-Sweep behaviour
----------------
-    2.400 → 2.425 → 2.450 → 2.475 → 2.500 →
-    2.525 → 2.550 → 2.575 → 2.600 → (wrap back to 2.400)
+Thứ tự quét:
+    2.400 → 2.425 → 2.450 → 2.475 → (quay lại 2.400)
+    5 frame/bước trước khi đổi tần số.
+    Quét liên tục bất kể kết quả inference.
+    Mỗi frame in ra bao gồm tần số đang thu.
 
-    5 frames captured per step before retuning.
-    Sweep always continues regardless of detection result.
-    Each frame printed includes its capture frequency.
-
-Threading model
----------------
-    USRP-Sweep-Capture thread  (background daemon)
-        Manages retune loop + capture_frame() in a tight loop.
-        Pushes (freq_hz, iq) tuples onto frame_queue.
+Mô hình thread:
+    Thread USRP-Sweep-Capture (daemon nền)
+        Quản lý vòng lặp retune + capture_frame() liên tục.
+        Đẩy tuple (freq_hz, iq) vào frame_queue.
 
     Main thread
-        Pulls (freq_hz, iq) from frame_queue.
-        Calls iq_to_spectrogram()   [CPU, ~12 ms]
-        Calls inferencer.run()      [NPU, ~22 ms]
-        Prints one result line per frame including frequency.
+        Kéo (freq_hz, iq) từ frame_queue.
+        Gọi iq_to_spectrogram()   [CPU, ~12 ms]
+        Gọi inferencer.run()      [NPU, ~22 ms]
+        In một dòng kết quả mỗi frame kèm tần số.
 
-Usage
------
-    python3 run_pipeline.py
-    python3 run_pipeline.py --gain 30
-    python3 run_pipeline.py --cpu
-    python3 run_pipeline.py --save_dir debug_specs/ --no_infer
-    python3 run_pipeline.py --no_sweep   # fixed at 2.400 GHz (debug)
+Cách chạy:
+    python3 run_pipeline_sweep.py
+    python3 run_pipeline_sweep.py --gain 30
+    python3 run_pipeline_sweep.py --cpu
+    python3 run_pipeline_sweep.py --save_dir debug_specs/ --no_infer
+    python3 run_pipeline_sweep.py --no_sweep   # cố định tại 2.400 GHz (debug)
 """
 
 import argparse
@@ -52,7 +46,7 @@ from telemetry_sender  import TelemetrySender
 
 IMG_H, IMG_W = 256, 512
 
-# Per-class console alert tags
+# Nhãn cảnh báo hiển thị trên console theo từng lớp
 _ALERT = {
     "DRONE"        : "  ⚠⚠ DRONE VIDEO",
     "DRONE_SIGNAL" : "  ~  DRONE SIGNAL",
@@ -61,7 +55,7 @@ _ALERT = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Main processing loop
+#  Vòng lặp xử lý chính
 # ─────────────────────────────────────────────────────────────────────────────
 
 def processing_loop(
@@ -72,21 +66,6 @@ def processing_loop(
     save_dir    : str  = None,
     no_infer    : bool = False,
 ) -> None:
-    """
-    Pull (freq_hz, iq) frames → STFT → 3-class NPU inference → telemetry.
-
-    Each console line includes the capture frequency so you can correlate
-    detections to specific channels across the sweep cycle.
-
-    Parameters
-    ----------
-    frame_queue : Queue of (freq_hz: int, iq: np.ndarray) tuples
-    inferencer  : DroneInferencer instance (None if no_infer=True)
-    stop_event  : set by SIGINT handler to exit cleanly
-    sender      : TelemetrySender instance (None to skip telemetry)
-    save_dir    : if set, saves each spectrogram PNG named by freq + frame idx
-    no_infer    : if True, only runs STFT (skips inference and telemetry)
-    """
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         print(f"[Pipeline] Saving spectrograms to {save_dir}/\n")
@@ -95,17 +74,17 @@ def processing_loop(
 
     while not stop_event.is_set():
 
-        # ── Pull next (freq_hz, iq) from sweep capture thread ─────────────────
+        # Kéo tuple (freq_hz, iq) tiếp theo từ thread thu sweep
         try:
             item = frame_queue.get(timeout=1.0)
         except queue.Empty:
             continue
 
-        # Unpack — freq_hz tells us which channel this frame belongs to
+        # Giải nén — freq_hz cho biết frame này thuộc kênh nào
         freq_hz, iq = item
         freq_ghz    = freq_hz / 1e9
 
-        # ── STFT on CPU ───────────────────────────────────────────────────────
+        # STFT trên CPU
         t0 = time.perf_counter()
         if frame_idx == 0:
             print("[Pipeline] First frame — saving debug intermediates to debug_stft/")
@@ -114,12 +93,12 @@ def processing_loop(
             tensor = iq_to_spectrogram(iq)
         stft_ms = (time.perf_counter() - t0) * 1000
 
-        # ── Optional debug save — named by frequency and frame index ──────────
+        # Lưu PNG debug đặt tên theo tần số và index frame
         if save_dir:
             fname = f"frame_{frame_idx:06d}_{freq_ghz:.4f}GHz.png"
             save_spectrogram_png(tensor, os.path.join(save_dir, fname))
 
-        # ── Inference disabled ────────────────────────────────────────────────
+        # Chế độ không inference
         if no_infer or inferencer is None:
             print(
                 f"[Frame {frame_idx:05d}]"
@@ -130,17 +109,17 @@ def processing_loop(
             frame_idx += 1
             continue
 
-        # ── NPU inference ─────────────────────────────────────────────────────
+        # Inference trên NPU
         result = inferencer.run(tensor)
 
-        # Attach capture frequency to result for telemetry context
+        # Gắn tần số thu vào result để telemetry biết nguồn gốc
         result["freq_hz"] = freq_hz
 
-        # ── POST to telemetry API (non-blocking) ──────────────────────────────
+        # Gửi kết quả lên API telemetry (non-blocking)
         if sender is not None:
             sender.send(result)
 
-        # ── One-line result per frame ─────────────────────────────────────────
+        # In một dòng kết quả mỗi frame
         queued = sender.stats["queued"] if sender else 0
         probs  = result["probs"]
         names  = inferencer.class_names   # ["DRONE", "DRONE_SIGNAL", "NO_DRONE"]
@@ -193,7 +172,7 @@ def main():
     args = get_args()
 
     sweep_active = not args.no_sweep
-    cycle_s      = NUM_SWEEP_STEPS * FRAMES_PER_STEP * 0.115   # approx
+    cycle_s      = NUM_SWEEP_STEPS * FRAMES_PER_STEP * 0.115   # ước tính
 
     sep = "=" * 68
     print(f"\n{sep}")
@@ -217,12 +196,12 @@ def main():
         print(f"  Save dir   : {args.save_dir}")
     print(f"{sep}\n")
 
-    # ── Telemetry sender ──────────────────────────────────────────────────────
+    # Khởi tạo telemetry sender
     sender = None
     if not args.no_telemetry and not args.no_infer:
         sender = TelemetrySender(env_path=args.env)
 
-    # ── Inference setup ───────────────────────────────────────────────────────
+    # Khởi tạo inference engine
     inferencer = None
     if not args.no_infer:
         inferencer = DroneInferencer(
@@ -232,22 +211,22 @@ def main():
             confidence_threshold = args.threshold,
         )
 
-    # ── USRP setup ────────────────────────────────────────────────────────────
+    # Kết nối USRP
     dev, streamer, metadata = open_usrp(addr=args.addr, gain=args.gain)
 
-    # ── Shared state ──────────────────────────────────────────────────────────
+    # Khởi tạo shared state
     frame_queue = queue.Queue(maxsize=args.queue_size)
     stop_event  = threading.Event()
 
-    # ── Graceful Ctrl+C ───────────────────────────────────────────────────────
+    # Xử lý Ctrl+C gracefully
     def _sigint(sig, frame):
         print("\n[Shutdown] Ctrl+C received — stopping ...")
         stop_event.set()
 
     signal.signal(signal.SIGINT, _sigint)
 
-    # ── Start sweep capture thread ────────────────────────────────────────────
-    # Pass usrp=dev to enable sweep; pass usrp=None to stay fixed (--no_sweep)
+    # Khởi động thread sweep capture
+    # usrp=dev → bật sweep; usrp=None → cố định tần số (--no_sweep)
     cap_thread = start_capture_thread(
         streamer    = streamer,
         metadata    = metadata,
@@ -258,7 +237,7 @@ def main():
 
     print("[Running] Ctrl+C to stop\n")
 
-    # ── Processing loop ───────────────────────────────────────────────────────
+    # Vòng lặp xử lý chính
     try:
         processing_loop(
             frame_queue = frame_queue,

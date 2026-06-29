@@ -1,10 +1,10 @@
 """
-new_train2.py
+new_train_with_graph.py
 =============================================================================
 3-Class Spectrogram Classifier: DRONE, DRONE_SIGNAL, and NO_DRONE
 Architecture  : EfficientNet-B0 (From Scratch, 100% NPU Compliant)
 Input Shape   : (1, 3, 256, 512) -> Full Wide Spectrogram
-Target Export : ONNX Opset 17 -> Optimized for Qualcomm AI Hub / RoCC Compilers
+Target Export : ONNX Opset 17 -> Optimized for Qualcomm AI Hub
 Split Logic   : Stratified Recording-Level Isolation (No Data Leakage)
 """
 
@@ -34,14 +34,10 @@ log = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# 1. Leakage-Free Stratified Group Data Engine
+# 1. Chia dataset thành các tập train / val / test
 # ===========================================================================
 
 def _extract_recording_id(filename: str) -> str:
-    """
-    Unified extraction parser matching both DRONE, DRONE_SIGNAL, and NO_DRONE variations.
-    Ensures adjacent timeline frames stay grouped together during partitioning.
-    """
     stem = Path(filename).stem
 
     if "__" in stem:
@@ -183,7 +179,7 @@ def get_dataloaders(
 
 
 # ===========================================================================
-# 3. Custom Pure CNN Architecture Block (100% NPU Hardware Fused)
+# 3. Kiến trúc EfficientNet-B0 (Tối ưu 100% cho NPU))
 # ===========================================================================
 
 def _make_divisible(v: float, d: int = 8) -> int:
@@ -411,9 +407,9 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, de
 # 5. Graph Export Drivers (Standard ONNX & RoCC Visualizer Graph)
 # ===========================================================================
 
+#Convert model sang ONNX
 def export_to_onnx(model: nn.Module, output_path: str = "drone_classifier_b0.onnx", num_classes: int = 3,
                    opset_version: int = 17, img_h: int = 256, img_w: int = 512) -> None:
-    """Exports model to standard production ONNX target payload."""
     model.eval()
     model.cpu()
     dummy = torch.zeros(1, 3, img_h, img_w, dtype=torch.float32)
@@ -429,10 +425,7 @@ def export_to_onnx(model: nn.Module, output_path: str = "drone_classifier_b0.onn
 
 def export_to_rocc_graph(model: nn.Module, output_path: str = "drone_classifier_rocc.onnx", img_h: int = 256,
                          img_w: int = 512) -> None:
-    """
-    Exports a clean, fully un-rolled execution graph file specialized for
-    Netron topology layout inspection, hardware cost calculation, and custom compiler ingestion.
-    """
+
     model.eval()
     model.cpu()
     dummy = torch.zeros(1, 3, img_h, img_w, dtype=torch.float32)

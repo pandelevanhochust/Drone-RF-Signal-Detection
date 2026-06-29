@@ -1,15 +1,7 @@
 """
 test_telemetry.py
 =============================================================================
-Standalone infinite loop script to continuously test your Telemetry API connection.
-Runs indefinitely, sending randomized mock 3-class data payloads until Ctrl+C.
-
-Refactored Updates:
--------------------
-  - Accuracy field now reflects true background classification confidence
-    when a drone is NOT detected instead of wiping it to 0.0.
-  - Dynamically assigns valid drone strings ("DJI Mavic 3", "RF Transmission", "None")
-    and explicit control states matching server ingestion rules.
+Test gui API toi server
 """
 
 import json

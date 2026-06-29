@@ -1,5 +1,5 @@
 """
-qai_hub_submit.py
+new_quantize.py
 =============================================================================
 Submits the custom 3-class EfficientNet-B0 ONNX graph to Qualcomm AI Hub for:
   1. INT8 quantization  (weights + activations calibrated to [0.0, 1.0] float)
@@ -33,17 +33,13 @@ from PIL import Image
 # ─────────────────────────────────────────────────────────────────────────────
 #  1. Aligned Calibration Data Engine
 # ─────────────────────────────────────────────────────────────────────────────
-
+# Xử lí ảnh từ calibration data thành đúng format đầu vào của mô hình
 def build_calibration_data(
         cal_dir: str,
         img_h: int = 256,
         img_w: int = 512,
         max_images: int = 100,
 ) -> dict:
-    """
-    Scan cal_dir recursively for images and preprocess each one to match
-    the training pipeline exactly: [0.0, 1.0] float32 range bounds.
-    """
     exts = ("*.png", "*.jpg", "*.jpeg", "*.bmp")
     files = []
     for ext in exts:
@@ -61,13 +57,12 @@ def build_calibration_data(
     arrays, skipped = [], 0
     for path in files:
         try:
-            # PIL resize expects width first: (W, H) -> (512, 256)
             img = Image.open(path).convert("RGB").resize(
                 (img_w, img_h), Image.BILINEAR
             )
-            arr = np.array(img, dtype=np.float32) / 255.0  # Range: [0.0, 1.0]
-            arr = arr.transpose(2, 0, 1)  # CHW layout
-            arr = arr[np.newaxis]  # Batch axis -> (1, 3, 256, 512)
+            arr = np.array(img, dtype=np.float32) / 255.0
+            arr = arr.transpose(2, 0, 1)
+            arr = arr[np.newaxis]
             arrays.append(arr)
         except Exception as exc:
             print(f"  [Calibration] Skipping corrupt/unreadable frame {Path(path).name}: {exc}")
@@ -93,7 +88,7 @@ def run_qai_hub_pipeline(
         img_h: int = 256,
         img_w: int = 512,
         num_classes: int = 3,
-        device_name: str = "Dragonwing RB3 Gen 2 Vision Kit",
+        device_name: str = "Dragonwing RB3 Gen 2 Vision Kit", #Sử dụng chip QCS 6490
 ) -> tuple:
     """Executes the specialized hardware-bounded cloud compilation cycle."""
     try:
