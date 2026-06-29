@@ -1,6 +1,0 @@
-numpy
-pandas
-scikit-learn
-tables
-keras
-tensorflow

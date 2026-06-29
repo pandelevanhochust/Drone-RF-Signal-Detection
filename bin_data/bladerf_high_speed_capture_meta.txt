@@ -1,0 +1,6 @@
+center_freq_hz=2375000000
+sample_rate_hz=60000000
+total_samples=192577536
+data_type=complex_float32_interleaved
+gain_db=30
+timestamp=2026-05-23T16:51:17.970703
