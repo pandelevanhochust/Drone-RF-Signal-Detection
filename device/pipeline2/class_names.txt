@@ -1,3 +1,0 @@
-DRONE
-NO_DRONE
-
