@@ -5,6 +5,8 @@ Entry point: wires usrp_capture, stft_preprocessor, and drone_inference
 together into the continuous live 3-class detection pipeline with
 frequency sweep.
 
+Optimized for workstation testing with NVIDIA GeForce RTX 2080 (CUDA).
+
 Sweep behaviour
 ---------------
     2.400 → 2.425 → 2.450 → 2.475 → 2.500 →
@@ -23,7 +25,7 @@ Threading model
     Main thread
         Pulls (freq_hz, iq) from frame_queue.
         Calls iq_to_spectrogram()   [CPU, ~12 ms]
-        Calls inferencer.run()      [NPU, ~22 ms]
+        Calls inferencer.run()      [GPU CUDA, ~3-5 ms]
         Prints one result line per frame including frequency.
 
 Usage
@@ -73,19 +75,10 @@ def processing_loop(
     no_infer    : bool = False,
 ) -> None:
     """
-    Pull (freq_hz, iq) frames → STFT → 3-class NPU inference → telemetry.
+    Pull (freq_hz, iq) frames → STFT → 3-class GPU inference → telemetry.
 
     Each console line includes the capture frequency so you can correlate
     detections to specific channels across the sweep cycle.
-
-    Parameters
-    ----------
-    frame_queue : Queue of (freq_hz: int, iq: np.ndarray) tuples
-    inferencer  : DroneInferencer instance (None if no_infer=True)
-    stop_event  : set by SIGINT handler to exit cleanly
-    sender      : TelemetrySender instance (None to skip telemetry)
-    save_dir    : if set, saves each spectrogram PNG named by freq + frame idx
-    no_infer    : if True, only runs STFT (skips inference and telemetry)
     """
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
@@ -130,7 +123,7 @@ def processing_loop(
             frame_idx += 1
             continue
 
-        # ── NPU inference ─────────────────────────────────────────────────────
+        # ── GPU inference ─────────────────────────────────────────────────────
         result = inferencer.run(tensor)
 
         # Attach capture frequency to result for telemetry context
@@ -152,7 +145,7 @@ def processing_loop(
             f"[Frame {frame_idx:05d}]"
             f"  {freq_ghz:.4f} GHz"
             f"  STFT {stft_ms:5.1f} ms"
-            f"  NPU {result['latency_ms']:5.1f} ms"
+            f"  GPU {result['latency_ms']:5.1f} ms"  # Thay đổi chữ hiển thị từ NPU -> GPU
             f"  ▶  {result['class']:<14s} {result['confidence']*100:5.1f}%"
             f"  [{bar}]"
             f"  [tx_q={queued}]"
@@ -169,13 +162,14 @@ def get_args():
     p = argparse.ArgumentParser(
         description="USRP X300 → STFT → 3-class Drone Detection with frequency sweep"
     )
-    p.add_argument("--model",        default="../new_three_classes.tflite")
+    # SỬA ĐỔI: Chuyển đổi mô hình mặc định từ file .tflite sang file .onnx
+    p.add_argument("--model",        default="../drone_classifier_b0.onnx")
     p.add_argument("--labels",       default="class_names.txt",
                    help="One class per line: DRONE, DRONE_SIGNAL, NO_DRONE")
     p.add_argument("--addr",         default="192.168.5.111")
     p.add_argument("--gain",         type=float, default=35.0)
     p.add_argument("--cpu",          action="store_true",
-                   help="Disable NPU delegate, run on CPU only")
+                   help="Disable GPU acceleration, run on CPU only")
     p.add_argument("--threshold",    type=float, default=0.70)
     p.add_argument("--save_dir",     default=None,
                    help="Save debug spectrogram PNGs (named by freq + frame idx)")
@@ -197,12 +191,13 @@ def main():
 
     sep = "=" * 68
     print(f"\n{sep}")
-    print("  USRP X300 → STFT → 3-Class Drone Detection  (RB3 Gen 2 NPU)")
+    print("  USRP X300 → STFT → 3-Class Drone Detection  (RTX 2080 GPU)") # Cập nhật tiêu đề hiển thị
     print(sep)
     print(f"  Model      : {args.model}")
     print(f"  Labels     : {args.labels}  (DRONE | DRONE_SIGNAL | NO_DRONE)")
     print(f"  USRP addr  : {args.addr}")
-    print(f"  Backend    : {'CPU only' if args.cpu else 'NPU (QNN HTP delegate)'}")
+    # SỬA ĐỔI: Thay đổi thông tin Log từ NPU sang GPU CUDA
+    print(f"  Backend    : {'CPU only' if args.cpu else 'GPU (ONNX Runtime CUDA)'}")
     print(f"  Gain       : {args.gain} dB")
     print(f"  Threshold  : {args.threshold}")
     print(f"  Telemetry  : {'disabled' if args.no_telemetry else f'enabled  env={args.env}'}")
@@ -228,7 +223,7 @@ def main():
         inferencer = DroneInferencer(
             model_path           = args.model,
             labels_path          = args.labels,
-            use_npu              = not args.cpu,
+            use_npu              = not args.cpu, # Kept for back-compatibility
             confidence_threshold = args.threshold,
         )
 
@@ -247,7 +242,6 @@ def main():
     signal.signal(signal.SIGINT, _sigint)
 
     # ── Start sweep capture thread ────────────────────────────────────────────
-    # Pass usrp=dev to enable sweep; pass usrp=None to stay fixed (--no_sweep)
     cap_thread = start_capture_thread(
         streamer    = streamer,
         metadata    = metadata,
