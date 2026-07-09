@@ -41,13 +41,13 @@ def compute_spectrogram_efficient(file_path, sample_rate, center_freq,start_ms=0
 # --- Execution ---
 # FILE_PATH = r"../captures/seg_0030_2440MHz.dat"
 # FILE_PATH = r"droneV2_data/DIS_0010_03.dat"
-FILE_PATH = r"stft_segmentation/Drone/noise.dat"
+FILE_PATH = r"stft_segmentation/NewCapture/25G.23.dat"
 
-FS = 25e6
+FS = 30e6
 CENTER_FREQ = 2.440e9
 
 # Let's just look at the first 20ms to save memory
-f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ,2000, duration_ms=200)
+f, t, Zxx = compute_spectrogram_efficient(FILE_PATH, FS, CENTER_FREQ,1, duration_ms=1)
 
 # Convert to dB
 spec_db = 10 * np.log10(np.abs(Zxx) ** 2 + 1e-10)
