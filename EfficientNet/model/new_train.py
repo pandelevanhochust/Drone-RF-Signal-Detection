@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from collections import defaultdict
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Logging Configuration
@@ -34,29 +35,26 @@ log = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# 1. Chia dataset thành các tập train / val / test
+# 1. Chia dataset thành các tập train / val
 # ===========================================================================
 
+# Chia file ảnh theo tên, để phân các tệp thu tín hiệu vào đúng tập train và tập val
 def _extract_recording_id(filename: str) -> str:
     stem = Path(filename).stem
-
-    # 1. Capture double underscore layout markers (24G__, drone__, noise__)
     if "__" in stem:
         return stem.split("__")[0]
 
-    # 2. Capture trailing underscore numeric sequences (100m_X, noisesss_X, debug_X)
     if "_" in stem:
         parts = stem.split("_")
         if parts[-1].isdigit():
             return "_".join(parts[:-1])
-
     return stem
 
-
+## Chia dataset
 def split_dataset(
     src_dir: str,
     dest_dir: str,
-    split_ratio: float = 0.2,
+    split_ratio: float = 0.2,  # ti le chia 80/20
     seed: int = 42,
 ) -> None:
     src = Path(src_dir)
@@ -83,14 +81,13 @@ def split_dataset(
             log.warning("Class subdirectory '%s' contains no valid frames — bypassing.", cls_dir.name)
             continue
 
-        # Group images by unique root recording experiment key
-        from collections import defaultdict
+        # Nhóm các ảnh theo đúng tệp thu
         recording_groups = defaultdict(list)
         for img_path in images:
             rec_id = _extract_recording_id(img_path.name)
             recording_groups[rec_id].append(img_path)
 
-        # Sort recording sessions by frame weight volume (descending)
+        # Sort các tệp ảnh theo số lượng
         sorted_recs = sorted(
             recording_groups.items(),
             key=lambda item: len(item[1]),
@@ -100,7 +97,7 @@ def split_dataset(
         train_recs, val_recs = [], []
         train_count, val_count = 0, 0
 
-        # Greedy knapsack assignment routing loop
+        # Thuật toán chọn để chia dataset
         for rec_id, frame_list in sorted_recs:
             rec_size = len(frame_list)
             total_current = train_count + val_count
@@ -116,7 +113,7 @@ def split_dataset(
                     train_recs.append((rec_id, frame_list))
                     train_count += rec_size
 
-        # Physical file deployment step
+        # Lưu file
         for split, rec_list in [("train", train_recs), ("val", val_recs)]:
             split_class_dir = dest / split / cls_dir.name
             split_class_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +134,6 @@ def split_dataset(
 # ===========================================================================
 
 def get_transforms(augment: bool = False, img_h: int = 256, img_w: int = 512) -> transforms.Compose:
-    """Build standardized, spectrogram-safe image formatting pipeline wrappers."""
     base = [
         transforms.Resize((img_h, img_w)),
         transforms.ToTensor(),              # Range: [0.0, 1.0] float32
@@ -163,7 +159,6 @@ def get_dataloaders(
     img_h: int = 256,
     img_w: int = 512,
 ) -> Tuple[DataLoader, DataLoader, Dict[int, str]]:
-    """Generate train/val processing iterators referencing the new partition directory."""
     root = Path(dataset_dir)
 
     train_dataset = datasets.ImageFolder(
@@ -481,7 +476,7 @@ def export_to_onnx(model: nn.Module, output_path: str = "drone_classifier_b0.onn
 
 if __name__ == "__main__":
     # ── Path Routing Configurations ────────────────────────────────────────
-    RAW_DATASET_DIR   = "UPDATED_DATASET"
+    RAW_DATASET_DIR   = "../UPDATED_DATASET"
     SPLIT_DATASET_DIR = "dataset_split"
 
     # ── Hardware & Size Dimensions ──────────────────────────────────────────
@@ -491,7 +486,7 @@ if __name__ == "__main__":
 
     # ── Training Budget Hyperparameters ────────────────────────────────────
     NUM_EPOCHS          = 50
-    BATCH_SIZE          = 16  # Keep at 16 to avoid VRAM OOM on wide matrices
+    BATCH_SIZE          = 16
     LEARNING_RATE       = 3e-4
     WEIGHT_DECAY        = 1e-2
     NUM_WORKERS         = 4
@@ -501,14 +496,14 @@ if __name__ == "__main__":
     CHECKPOINT_PATH = "best_model.pth"
     ONNX_OUTPUT     = "drone_classifier_b0.onnx"
 
-    # Step 1: Clean and execute a balanced group partition split on raw directories
+    # Step 1: Chia dataset
     if os.path.exists(SPLIT_DATASET_DIR):
         log.info("Removing obsolete data directory partition layout array nodes...")
         shutil.rmtree(SPLIT_DATASET_DIR)
 
     split_dataset(src_dir=RAW_DATASET_DIR, dest_dir=SPLIT_DATASET_DIR, split_ratio=0.2, seed=42)
 
-    # Step 2: Initialize dataloaders
+    # Step 2:Load data
     train_loader, val_loader, idx_to_class = get_dataloaders(
         dataset_dir=SPLIT_DATASET_DIR, batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS, img_h=IMG_H, img_w=IMG_W,
@@ -519,7 +514,7 @@ if __name__ == "__main__":
     n_params = sum(p.numel() for p in model.parameters())
     log.info("DroneClassifier Model initialized footprint parameter weight count: %s", f"{n_params:,}")
 
-    # Step 4: Execute training loop execution matrix
+    # Step 4: Huấn luyện
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:

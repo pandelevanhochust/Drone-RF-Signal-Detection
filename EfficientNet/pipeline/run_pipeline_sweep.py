@@ -149,7 +149,7 @@ def get_args():
         description="USRP X300 → STFT → 3-class Drone Detection with frequency sweep"
     )
     p.add_argument("--model",        default="../new_three_classes.tflite")
-    p.add_argument("--labels",       default="class_names.txt",
+    p.add_argument("--labels",       default="class_namezs.txt",
                    help="One class per line: DRONE, DRONE_SIGNAL, NO_DRONE")
     p.add_argument("--addr",         default="192.168.5.111")
     p.add_argument("--gain",         type=float, default=35.0)
